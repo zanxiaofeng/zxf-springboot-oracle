@@ -1,0 +1,29 @@
+spring:
+  datasource:
+    url: jdbc:oracle:thin:@()
+    username: test
+    password: test
+    driver_class_name: oracle.jdbc.OracleDriver
+    type: oracle.ucp.jdbc.PoolDataSource
+    oracleucp:
+      connection-factory-class-name:
+      connection-pool-name: pool-test
+      s-q-l-for-validata-connection: select * from dual
+      fast-connection-failover-enabled: true
+      validate-connection-on-borrow: true
+      initial-pool-size: 5
+      min-pool-size: 5
+      max-pool-size: 10
+      connection-wait-timeout: 15
+      connection-validate-timeout: 5
+      inactive-connection-timeout: 600
+      max-connection-reuse-timeout: 1800
+      abandoned-connection-timeout: 60
+      time-to-live-connection-timeout: 180
+      connection-properties:
+        oracle.net.keepAlive: true
+        oracle.net.TCP_KEEPIDLE: 60
+        oracle.jdbc.diagnostic.enableLogging: true
+        oracle.ucp.diagnostic.loggingLevel: FINEST
+        java.util.logging.config.file:
+

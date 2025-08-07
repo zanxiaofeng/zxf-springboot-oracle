@@ -1,0 +1,8 @@
+# Core classes
+- oracle.jdbc.OracleConnection.CONNECTION_PROPERTY_NET_KEEPALIVE
+- oracle.jdbc.OracleConnection.CONNECTION_PROPERTY_NET_KEEPALIVE_DEFAULT
+- oracle.jdbc.OracleConnection.CONNECTION_PROPERTY_TCP_KEEPIDLE
+- oracle.jdbc.OracleConnection.CONNECTION_PROPERTY_TCP_KEEPIDLE_DEFAULT
+- oracle.jdbc.OracleConnection.CONNECTION_PROPERTY_TCP_KEEPINTERVAL
+- oracle.jdbc.OracleConnection.CONNECTION_PROPERTY_TCP_KEEPINTERVAL_DEFAULT
+- 
