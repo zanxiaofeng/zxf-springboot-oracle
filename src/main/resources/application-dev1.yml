@@ -1,0 +1,5 @@
+spring:
+  datasource:
+    oracleucp:
+      connection-properties:
+        java.util.logging.config.file: classpath:my-jul.properties

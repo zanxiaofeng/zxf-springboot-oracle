@@ -1,0 +1,8 @@
+logging:
+  pattern:
+    console: ZXF-DEV %d{yyyy-MM-dd HH:mm:ss.SSS} - %-5level [%thread] %logger{36} - %msg%n
+  level:
+    root: info
+    oracle.jdbc: debug
+    oracle.ucp: debug
+    pool-test: debug
