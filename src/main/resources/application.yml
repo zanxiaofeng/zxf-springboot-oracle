@@ -1,14 +1,14 @@
 spring:
   datasource:
-    url: jdbc:oracle:thin:@()
-    username: test
-    password: test
+    url: jdbc:oracle:thin:@//localhost:1521/FREE
+    username: system
+    password: 123456
     driver_class_name: oracle.jdbc.OracleDriver
     type: oracle.ucp.jdbc.PoolDataSource
     oracleucp:
       connection-factory-class-name:
       connection-pool-name: pool-test
-      s-q-l-for-validata-connection: select * from dual
+      s-q-l-for-validate-connection: select * from dual
       fast-connection-failover-enabled: true
       validate-connection-on-borrow: true
       initial-pool-size: 5
@@ -26,4 +26,3 @@ spring:
         oracle.jdbc.diagnostic.enableLogging: true
         oracle.ucp.diagnostic.loggingLevel: FINEST
         java.util.logging.config.file:
-
