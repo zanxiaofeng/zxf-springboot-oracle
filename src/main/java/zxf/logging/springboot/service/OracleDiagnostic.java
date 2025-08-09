@@ -6,6 +6,7 @@ import oracle.jdbc.diagnostics.CommonDiagnosable;
 import oracle.ucp.diagnostics.DiagnosticsCollectorImpl;
 import org.springframework.stereotype.Service;
 
+import java.nio.file.Paths;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -13,12 +14,25 @@ import java.util.logging.Logger;
 @Service
 public class OracleDiagnostic {
 
-    public static void init() {
+    public static void julConfig() {
+        System.out.println("Checking JUL Configuration.............");
+        System.out.println("1.0 Check config setting.............");
+        String configClassFromSysProp = System.getProperty("java.util.logging.config.class");
+        System.out.println("1.1 Check config class setting from system property java.util.logging.config.class, " + configClassFromSysProp);
+        String configFileFromSysProp = System.getProperty("java.util.logging.config.file");
+        System.out.println("1.2 Check config file setting from system property java.util.logging.config.file, as local path, " + configFileFromSysProp);
+        String configFileDefault = Paths.get(System.getProperty("java.home"), "conf", "logging.properties").toString();
+        System.out.println("1.3 Check default config file {java.home}/conf/logging.properties, as local path, " + configFileDefault);
+    }
+
+    public static void setupSystemProperties() {
         System.setProperty("oracle.jdbc.diagnostic.enableLogging", "true");
         System.setProperty("oracle.ucp.timersAffectAllConnections", "true");
         System.setProperty("oracle.ucp.diagnostic.enableLogging", "true");
+        //Setting by this property will override the settings from springboot logging setttings
         System.setProperty("oracle.ucp.diagnostic.loggingLevel", "FINEST");
-        System.setProperty("java.util.logging.config.file", "classpath:my-jul.properties");
+        //Setting by log file will be overridded by springboot logging settings(Default: INFO for root logger) or oracle.ucp.diagnostic.loggingLevel
+        System.setProperty("java.util.logging.config.file", "./src/main/resources/my-jul.properties");
     }
 
     public void oracleJdbc(Boolean setting) {
