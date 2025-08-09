@@ -1,6 +1,4 @@
 spring:
-  profiles:
-    active: dev3
   datasource:
     url: jdbc:oracle:thin:@//localhost:1521/FREE
     username: system
