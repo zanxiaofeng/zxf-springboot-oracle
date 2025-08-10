@@ -37,20 +37,33 @@ public class OracleDiagnostic {
 
     public void oracleJdbc(Boolean setting) {
         String logName = ((CommonDiagnosable) CommonDiagnosable.getInstance()).getDiagnosticLoggerName();
+        log.info(String.format("Oracle JDBC Diagnosable, name=%s, debug=%s", logName, CommonDiagnosable.getInstance().isDebugEnabled()));
         Logger jdbcLogger = Logger.getLogger(logName);
-        log.info(String.format("Oracle JDBC Logging, name=%s, level=%s, debug=%s", logName, jdbcLogger.getLevel(), CommonDiagnosable.getInstance().isDebugEnabled()));
+        log.info(String.format("Oracle JDBC Logging - %s, handlers=%s, level=%s", logName, jdbcLogger.getHandlers().toString(), jdbcLogger.getLevel()));
         if (setting != null && setting) {
+            //Set by Logger
             jdbcLogger.setLevel(Level.FINEST);
+            //Set by Diagnosable
+            ((CommonDiagnosable) CommonDiagnosable.getInstance()).setDebugEnabled(true);
         }
     }
 
     public void oracleUcp(Boolean setting) {
         String logName = DiagnosticsCollectorImpl.getCommon().getLoggerName();
+        log.info(String.format("Oracle UCP Diagnosable, name=%s, logging=%s, level=%s", logName, DiagnosticsCollectorImpl.getCommon().getLoggingEnabled(),
+                DiagnosticsCollectorImpl.getCommon().getLogLevel()));
         Logger ucpLogger = Logger.getLogger(logName);
-        Logger poolLogger = Logger.getLogger("pool-test");
-        log.info(String.format("Oracle  UCP Logging, name=%s, level=%s-%s, pool=%s", logName, ucpLogger.getLevel(), DiagnosticsCollectorImpl.getCommon().getLogLevel(), poolLogger.getLevel()));
+        log.info(String.format("Oracle JDBC Logging - %s, handlers=%s, level=%s", logName, ucpLogger.getHandlers().toString(), ucpLogger.getLevel()));
+        String poolName = "pool-test";
+        Logger poolLogger = Logger.getLogger(poolName);
+        log.info(String.format("Oracle JDBC Logging - %s, handlers=%s, level=%s", poolName, poolLogger.getHandlers().toString(), poolLogger.getLevel()));
         if (setting != null && setting) {
+            //Set by Logger
             ucpLogger.setLevel(Level.FINEST);
+            poolLogger.setLevel(Level.FINEST);
+            //Set by Diagnosable
+            DiagnosticsCollectorImpl.getCommon().setLoggingEnabled(true);
+            DiagnosticsCollectorImpl.getCommon().setLogLevel(Level.FINEST);
         }
     }
 }

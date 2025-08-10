@@ -9,7 +9,6 @@ import zxf.logging.springboot.service.OracleDiagnostic;
 @SpringBootApplication
 public class ApplicationWithSystemProperties {
     public static void main(String[] args) {
-        System.setProperty("spring.profiles.active", "dev");
         OracleDiagnostic.setupSystemProperties();
         OracleDiagnostic.julConfig();
         SpringApplication.run(ApplicationWithSystemProperties.class, args);

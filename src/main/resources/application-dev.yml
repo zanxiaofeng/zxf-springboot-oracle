@@ -1,3 +1,8 @@
+spring:
+  datasource:
+    oracleucp:
+      connection-properties:
+        oracle.jdbc.diagnostic.enableLogging: true
 logging:
   pattern:
     console: ZXF-DEV2 %d{yyyy-MM-dd HH:mm:ss.SSS} - %-5level [%thread] %logger{36} - %msg%n

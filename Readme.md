@@ -31,3 +31,7 @@
 
 # UCP Best Practices for Oracle Database and Spring Boot
 - https://blogs.oracle.com/developers/post/ucp-best-practices-for-oracle-database-19c-and-spring-boot
+
+# How to enable oracle logging
+- oracle.jdbc.diagnostic.enableLogging=true
+- oracle.ucp.diagnostic.enableLogging=true
