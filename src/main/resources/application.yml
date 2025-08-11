@@ -17,7 +17,7 @@ spring:
       connection-wait-timeout: 15
       connection-validate-timeout: 5
       inactive-connection-timeout: 60
-      max-connection-reuse-timeout: 300
+      max-connection-reuse-time: 300
       abandoned-connection-timeout: 60
       time-to-live-connection-timeout: 180
       connection-properties:
