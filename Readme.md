@@ -35,3 +35,7 @@
 # How to enable oracle logging
 - oracle.jdbc.diagnostic.enableLogging=true
 - oracle.ucp.diagnostic.enableLogging=true
+
+# 乐观锁定模式与悲观锁定模式
+- 乐观锁定模式的本质是CAS，即写时冲突检测
+- 悲观锁定模式的本质是synchronized，即同步执行
