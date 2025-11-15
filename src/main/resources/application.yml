@@ -21,5 +21,6 @@ spring:
       abandoned-connection-timeout: 60
       time-to-live-connection-timeout: 180
       connection-properties:
+        oracle.jdbc.defaultLobPrefetchSize: 4000
         oracle.net.keepAlive: true
         oracle.net.TCP_KEEPIDLE: 60
