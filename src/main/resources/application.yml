@@ -14,7 +14,7 @@ spring:
       initial-pool-size: 0
       min-pool-size: 0
       max-pool-size: 3
-      connection-wait-timeout: 15
+      connection-wait-duration: 15S
       connection-validate-timeout: 5
       inactive-connection-timeout: 60
       max-connection-reuse-time: 300
