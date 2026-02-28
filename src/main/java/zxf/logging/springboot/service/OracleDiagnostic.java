@@ -6,7 +6,7 @@ import oracle.jdbc.diagnostics.CommonDiagnosable;
 import oracle.ucp.diagnostics.DiagnosticsCollectorImpl;
 import org.springframework.stereotype.Service;
 
-import java.nio.file.Paths;
+import java.nio.file.Path;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -21,7 +21,7 @@ public class OracleDiagnostic {
         System.out.println("1.1 Check config class setting from system property java.util.logging.config.class, " + configClassFromSysProp);
         String configFileFromSysProp = System.getProperty("java.util.logging.config.file");
         System.out.println("1.2 Check config file setting from system property java.util.logging.config.file, as local path, " + configFileFromSysProp);
-        String configFileDefault = Paths.get(System.getProperty("java.home"), "conf", "logging.properties").toString();
+        String configFileDefault = Path.of(System.getProperty("java.home"), "conf", "logging.properties").toString();
         System.out.println("1.3 Check default config file {java.home}/conf/logging.properties, as local path, " + configFileDefault);
     }
 
@@ -37,9 +37,9 @@ public class OracleDiagnostic {
 
     public void oracleJdbc(Boolean setting) {
         String logName = ((CommonDiagnosable) CommonDiagnosable.getInstance()).getDiagnosticLoggerName();
-        log.info(String.format("Oracle JDBC Diagnosable, name=%s, debug=%s", logName, CommonDiagnosable.getInstance().isDebugEnabled()));
+        log.info("Oracle JDBC Diagnosable, name=%s, debug=%s".formatted(logName, CommonDiagnosable.getInstance().isDebugEnabled()));
         Logger jdbcLogger = Logger.getLogger(logName);
-        log.info(String.format("Oracle JDBC Logging - %s, handlers=%s, level=%s", logName, jdbcLogger.getHandlers().toString(), jdbcLogger.getLevel()));
+        log.info("Oracle JDBC Logging - %s, handlers=%s, level=%s".formatted(logName, jdbcLogger.getHandlers().toString(), jdbcLogger.getLevel()));
         if (setting != null && setting) {
             //Set by Logger
             jdbcLogger.setLevel(Level.FINEST);
@@ -50,13 +50,13 @@ public class OracleDiagnostic {
 
     public void oracleUcp(Boolean setting) {
         String logName = DiagnosticsCollectorImpl.getCommon().getLoggerName();
-        log.info(String.format("Oracle UCP Diagnosable, name=%s, logging=%s, level=%s", logName, DiagnosticsCollectorImpl.getCommon().getLoggingEnabled(),
+        log.info("Oracle UCP Diagnosable, name=%s, logging=%s, level=%s".formatted(logName, DiagnosticsCollectorImpl.getCommon().getLoggingEnabled(),
                 DiagnosticsCollectorImpl.getCommon().getLogLevel()));
         Logger ucpLogger = Logger.getLogger(logName);
-        log.info(String.format("Oracle JDBC Logging - %s, handlers=%s, level=%s", logName, ucpLogger.getHandlers().toString(), ucpLogger.getLevel()));
+        log.info("Oracle JDBC Logging - %s, handlers=%s, level=%s".formatted(logName, ucpLogger.getHandlers().toString(), ucpLogger.getLevel()));
         String poolName = "pool-test";
         Logger poolLogger = Logger.getLogger(poolName);
-        log.info(String.format("Oracle JDBC Logging - %s, handlers=%s, level=%s", poolName, poolLogger.getHandlers().toString(), poolLogger.getLevel()));
+        log.info("Oracle JDBC Logging - %s, handlers=%s, level=%s".formatted(poolName, poolLogger.getHandlers().toString(), poolLogger.getLevel()));
         if (setting != null && setting) {
             //Set by Logger
             ucpLogger.setLevel(Level.FINEST);

@@ -28,7 +28,7 @@ public class HomeController {
                 .addValue("zonedDateTime", ZonedDateTime.now());
         return namedParameterJdbcTemplate.queryForObject("SELECT DBTIMEZONE, SESSIONTIMEZONE, CURRENT_DATE, CURRENT_TIMESTAMP, LOCALTIMESTAMP, SYSDATE, SYSTIMESTAMP, :localDateTime AS LOCAL_DATETIME, :zonedDateTime AS ZONED_DATETIME from dual"
                 , sqlParameterSource, (rs, rowNum) -> {
-                    return String.format("DBTIMEZONE=%s, SESSIONTIMEZONE=%s %s %s %s %s %s %s %s",
+                    return "DBTIMEZONE=%s, SESSIONTIMEZONE=%s %s %s %s %s %s %s %s".formatted(
                             rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4), rs.getString(5), rs.getString(6), rs.getString(7), rs.getString(8), rs.getString(9));
                 });
     }
