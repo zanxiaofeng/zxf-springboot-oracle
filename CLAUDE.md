@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a Spring Boot 2.7.18 application demonstrating Oracle JDBC and UCP (Universal Connection Pool) diagnostic logging integration. It uses Java 17 and Oracle JDBC 23.4.0.24.05.
+This is a Spring Boot 4.1.0 application demonstrating Oracle JDBC and UCP (Universal Connection Pool) diagnostic logging integration. It uses Java 21 and Oracle JDBC 23.x.
 
 ## Build and Run
 
@@ -87,3 +87,4 @@ Pool configuration in `application.yml`:
 ## JDK Location
 
 - Java 17: `/usr/lib/jvm/java-1.17.0-openjdk-amd64`
+- Java 21 (full JDK, required for build): `/home/davis/.jdks/ms-21.0.10` — note that `/usr/lib/jvm/java-*-openjdk-amd64` are JRE-only (no `javac`) and cannot compile. Build with `JAVA_HOME=/home/davis/.jdks/ms-21.0.10 mvn clean package`.
