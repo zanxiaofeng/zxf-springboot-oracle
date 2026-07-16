@@ -419,9 +419,6 @@ zxf.logging.springboot.cred.CredentialBootstrapInitializer
 package zxf.logging.springboot.cred;
 
 import oracle.ucp.jdbc.PoolDataSource;
-import io.micrometer.core.instrument.Counter;
-import io.micrometer.core.instrument.MeterRegistry;
-import io.micrometer.core.instrument.Tags;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
@@ -437,7 +434,6 @@ import java.util.Properties;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 
 @Slf4j
@@ -457,13 +453,6 @@ public class DynamicCredentialRefresher {
     /** 上次成功应用的凭据缓存；用于变更比较，避免调用已废弃的 PoolDataSource.getPassword() */
     private volatile DbCredentials lastApplied = new DbCredentials(null, null);
 
-    // 可观测性：轮转健康度指标，供 Prometheus/Grafana 监控
-    private final MeterRegistry meterRegistry;
-    private final AtomicLong lastRefreshEpoch = new AtomicLong(0);
-    private Counter refreshSuccess;
-    private Counter refreshFailure;
-    private Counter verifyFailure;
-
     /** 轮询用虚拟线程：单线程、轻量短任务，适合阻塞型 I/O（mtime 读取） */
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(
             Thread.ofVirtual().name("cred-poll-", 0).factory());
@@ -474,14 +463,11 @@ public class DynamicCredentialRefresher {
 
     public DynamicCredentialRefresher(
             DataSource dataSource,
-            CredentialFileSource credSource,
-            MeterRegistry meterRegistry) throws IOException {
+            CredentialFileSource credSource) throws IOException {
         this.poolDataSource = unwrapPool(dataSource);
         this.credSource = credSource;
-        this.meterRegistry = meterRegistry;
         this.watchService = FileSystems.getDefault().newWatchService();
         this.watcher = Thread.ofPlatform().name("secret-watcher").unstarted(this::watchServiceLoop);
-        registerMetrics();
     }
 
     /** DataSource 可能被 LazyConnectionDataSourceProxy 包装，需 unwrap 到真实 PoolDataSource */
@@ -489,15 +475,6 @@ public class DynamicCredentialRefresher {
         return dataSource.isWrapperFor(PoolDataSource.class)
                 ? dataSource.unwrap(PoolDataSource.class)
                 : (PoolDataSource) dataSource;
-    }
-
-    private void registerMetrics() {
-        Tags t = Tags.empty();
-        this.refreshSuccess = meterRegistry.counter("cred.refresh.count", t.and("result", "success"));
-        this.refreshFailure = meterRegistry.counter("cred.refresh.count", t.and("result", "failure"));
-        this.verifyFailure = meterRegistry.counter("cred.verify.failed", t);
-        // Gauge：上次成功轮转的 epoch 秒，便于告警「长时间未轮转」
-        meterRegistry.gauge("cred.refresh.lastTime", t, lastRefreshEpoch);
     }
 
     @EventListener(ApplicationReadyEvent.class)
@@ -574,7 +551,6 @@ public class DynamicCredentialRefresher {
 
             if (!verifyNewCredentials()) {
                 // 失败不回退——旧连接仍可服务，等待下一轮重试
-                verifyFailure.increment();
                 log.error("Credential verification FAILED; old connections may still be served, will retry next cycle");
                 return;
             }
@@ -582,14 +558,11 @@ public class DynamicCredentialRefresher {
             lastApplied = creds;
             lastRefreshTime = Instant.now();
             lastSeenMtime = credSource.latestMtime();
-            lastRefreshEpoch.set(lastRefreshTime.getEpochSecond());
-            refreshSuccess.increment();
             log.info("UCP credentials refreshed & verified. borrowed={}, available={}",
                     poolDataSource.getBorrowedConnectionsCount(),
                     poolDataSource.getAvailableConnectionsCount());
         } catch (Exception e) {
             // 异常栈含 Properties（含密码），仅记录消息，避免密码进入日志
-            refreshFailure.increment();
             log.error("Failed to refresh UCP credentials: {}", e.toString());
         } finally {
             refreshLock.unlock();
