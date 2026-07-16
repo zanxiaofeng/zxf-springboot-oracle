@@ -7,7 +7,7 @@ import zxf.logging.springboot.service.OracleDiagnostic;
 
 @Slf4j
 @SpringBootApplication
-public class MyApplication {
+public class OracleApplication {
     public static void main(String[] args) {
         if (true) {
             // With system properties
@@ -18,6 +18,6 @@ public class MyApplication {
             System.setProperty("spring.profiles.active", "dev");
             OracleDiagnostic.julConfig();
         }
-        SpringApplication.run(MyApplication.class, args);
+        SpringApplication.run(OracleApplication.class, args);
     }
 }

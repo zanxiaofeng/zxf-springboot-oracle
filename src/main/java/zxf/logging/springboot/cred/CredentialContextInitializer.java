@@ -23,8 +23,9 @@ public class CredentialContextInitializer implements ApplicationContextInitializ
         ConfigurableEnvironment env = applicationContext.getEnvironment();
         // 上下文创建前无 Bean 可注入，直接 new 文件源（与运行期共享同一读取逻辑）
         CredentialFileSource source = new CredentialFileSource(
-                env.getProperty("DB_CRED_DIR", "/etc/secrets/db"));
+                env.getProperty("DB_CRED_DIR", "~/secrets/db"));
         if (!source.isAvailable()) {
+
             return; // dev/无挂载：回退到 application.yml
         }
         try {
