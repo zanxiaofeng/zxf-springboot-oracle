@@ -478,50 +478,199 @@ public class DatabaseHealthIndicator implements HealthIndicator {
 - **ESO refreshInterval 必须留足余量**：若 rotation_period=24h，建议 refreshInterval=6h。若设置为接近 24h，可能在 Vault 轮转后、ESO 刷新前的窗口期内，应用仍持有旧密码导致连接失败。
 - **Java 代码无需区分 Static/Dynamic**：上述 DynamicCredentialRefresher 对两种模式完全兼容。Static Role 下用户名虽不变，但密码变化仍会触发 `reconfigureDataSource(Properties)`，逻辑自洽。
 
+## 9. 方案评估（结合 2026-07 最新资讯）
+
+> 以下评估基于 2026 年 7 月对各组件最新官方文档与发布记录的核对，重点标注 **必须修复的正确性问题**、**重要遗漏** 与 **健壮性建议**。
+
+### 9.1 版本基线需更新
+
+| 组件 | 方案原值 | 最新资讯（2026-07） | 建议 |
+|---|---|---|---|
+| ESO | `0.10.3+` | Operator 已演进至 **v2.4.1**（2026-04-28 发布），v1 API 已稳定多版本 | 基线改为 **v2.x**；`external-secrets.io/v1` YAML 不变。原 `0.10.3` 仅为 v1 GA 的历史最低线，作为 2026 基线已陈旧 |
+| Spring Boot | 4.1.0 | 已 GA（2025-11），新增 `spring.datasource.connection-fetch=lazy` | 见 9.2.1，与本方案存在交互 |
+| Vault | 1.15+ | 1.18+ 已 GA，Oracle 插件支持 `self_managed=true` Rootless 配置 | 见 9.3.1 |
+| JDK | 21 | 注意：`synchronized` 导致的虚拟线程钉住在 **JDK 24（JEP 491）** 才修复 | 见 9.4.1 |
+
+### 9.2 关键正确性问题（必须修复）
+
+#### 9.2.1 `connection-fetch=lazy` / 包装型 DataSource 致 `instanceof` 失败
+
+Spring Boot 4.1 新增 `spring.datasource.connection-fetch=lazy`，启用后自动将池化 DataSource 包一层 `LazyConnectionDataSourceProxy`。此时 `DynamicCredentialRefresher` 构造函数中的判断：
+
+```java
+if (!(dataSource instanceof PoolDataSource pds)) { throw ... }
+```
+
+将 **直接抛异常**（注入的是代理而非 `PoolDataSource`）。`DatabaseHealthIndicator` 同理。
+
+**修复**：
+
+```java
+this.poolDataSource = dataSource.isWrapperFor(PoolDataSource.class)
+        ? dataSource.unwrap(PoolDataSource.class)
+        : (PoolDataSource) dataSource;
+```
+
+或显式注入原始 Bean：
+
+```java
+public DynamicCredentialRefresher(PoolDataSource poolDataSource, ...) { ... }
+```
+
+#### 9.2.2 启动期凭据时序：`ApplicationReadyEvent` 太晚
+
+方案用 `PLACEHOLDER` 占位，在 `ApplicationReadyEvent` 才加载真实凭据。但任何**启动期即获取连接**的组件（Flyway / Liquibase 迁移、JPA `ddl-auto`、`hikari`/UCP 初始化探测、部分健康检查）会在 `ApplicationReadyEvent` 之前借连接，直接用 `PLACEHOLDER` 建连失败。
+
+**修复（任选其一）**：
+- 用 `EnvironmentPostProcessor` 在上下文刷新前把 `username`/`password` 注入 `Environment`；
+- 或自定义 `@Bean PoolDataSource`，在工厂方法内直接读 `/etc/secrets/db`；
+- 或保证启动期无连接借出（`initial/min-pool-size=0` + 关闭 Flyway/JPA-DDL + `management.health.db.enabled=false`），并依赖首请求才建连——但脆弱，不推荐。
+
+#### 9.2.3 `verifyNewCredentials()` 可能命中旧连接
+
+`reconfigureDataSource(props)` 后，**池中已借出/空闲的旧连接被标记为过期但不会立即销毁**，新连接才用新密码。紧接着的 `getConnection()` + `isValid(3)` 可能恰好分到一条旧连接（旧密码仍有效），返回 `true` → **误判已验证**。
+
+**修复**：验证逻辑应强制获取新连接，例如：
+
+```java
+// 关闭并重建一条专用验证连接，或比较 reconfigure 前后 borrow 计数
+poolDataSource.reconfigureDataSource(props);
+try (Connection c = poolDataSource.getConnection()) {   // reconfigure 后新借
+    return c.isValid(3) && !c.getMetaData().getUserName().isBlank();
+}
+```
+
+并配合日志输出 UCP 统计（`getAvailableConnectionsCount` / `getBorrowedConnectionsCount`）确认旧连接被回收。
+
+### 9.3 重要遗漏（建议补充）
+
+#### 9.3.1 Vault Rootless 配置（`self_managed=true`）—— 强烈推荐
+
+HashiCorp 官方为 Oracle 插件提供 **Rootless 配置**：`database/config` 无需任何特权 root 账号，每个 static role 自带独立连接。官方明确建议「以最小权限把 DB 用户 onboarding 为 static role」。本方案当前仍依赖 `vault_admin` 高权账号，应评估切换：
+
+```bash
+vault write database/config/oracle \
+  plugin_name="vault-plugin-database-oracle" \
+  connection_url="{{username}}/{{password}}@//oracle:1521/XEPDB1" \
+  self_managed=true \
+  allowed_roles="app-fixed-user"
+
+vault write database/static-roles/app-fixed-user \
+  db_name=oracle username="APP_USER" password="<initial>" rotation_period="24h"
+```
+
+**权衡**：不支持 dynamic roles（本方案不需要）；若发生带外（out-of-band）密码修改，Vault 与 DB 会失步，需手动同步。与本方案的「禁止 root/admin 用 Static Role」原则一致。
+
+#### 9.3.2 Vault Oracle 插件部署前置（方案缺失）
+
+Vault 默认 **不含** Oracle 插件，必须：
+1. 下载 `vault-plugin-database-oracle` 二进制并注册到 `sys/plugins/catalog/database/`（带 `sha256`）；
+2. Vault 主机安装 **Oracle Instant Client**（`libclntsh` 置于 `ld.so.conf` 路径）；
+3. Enterprise 版需匹配 Instant Client 19.26（见插件版本表）。
+
+方案 §2 直接 `vault secrets enable database` + `plugin_name=oracle-database-plugin`，未覆盖上述部署步骤，生产落地会卡在插件未注册。
+
+#### 9.3.3 `vault_admin` 所需最小权限
+
+Static Role 仅做密码轮转，管理账号**至少**需要：
+
+```sql
+GRANT ALTER USER TO vault_admin WITH ADMIN OPTION;
+GRANT CREATE SESSION TO vault_admin;
+-- 可选：回收用户会话（revoke 时终止会话）
+GRANT SELECT ON gv_$session TO vault_admin;
+GRANT ALTER SYSTEM TO vault_admin;   -- 仅当需要 KILL SESSION
+```
+
+动态角色才需 `CREATE USER / DROP USER`。当前方案未列出授权，落地易权限不足。
+
+#### 9.3.4 `oracleucp.*` 绑定依赖（与本仓库现状不符）
+
+`spring.datasource.oracleucp.*` 前缀由 `com.oracle.database.spring:oracle-spring-boot-starter-datasource` 绑定，**Spring Boot 原生不解析该命名空间**。但本仓库 `pom.xml` 当前**未引入**该 starter，也**未引入 actuator**。因此：
+- 方案 §5.2 的 `oracleucp.initial-pool-size` 等调优项在当前依赖下**很可能被静默忽略**；
+- §6.3 健康检查依赖 actuator（当前缺失）。
+
+**修复**：在 `pom.xml` 补充 `oracle-spring-boot-starter-datasource` 与 `spring-boot-starter-actuator`；或自定义 `@Bean @ConfigurationProperties("spring.datasource.oracleucp") PoolDataSource` 显式绑定，并通过启动后打印 `poolDataSource.getURL()/getMaxPoolSize()` 确认配置已生效。
+
+### 9.4 健壮性优化建议
+
+#### 9.4.1 虚拟线程 + `WatchService` 钉住（JEP 444 已知限制）
+
+`WatchService.take()` 在 Linux 上基于 `inotify`，是**原生阻塞调用**，在 JDK 21 中会钉住载体线程（carrier pinning），`synchronized` 钉住问题要到 **JDK 24（JEP 491）** 才修复。方案用 `Thread.ofVirtual().start(this::watchServiceLoop)` 跑长生命周期的 watch 循环，钉住一条载体线程，违背使用虚拟线程的初衷。
+
+**建议**：
+- watch 循环改用**平台线程**（仅一条长生命周期线程，开销可忽略）；
+- 或**直接去掉 WatchService，只保留 30s 轮询**（基于 mtime）。K8s 挂载 Secret 的 symlink 原子替换恰好能被 mtime 轮询可靠捕获，轮询方案更简单、更确定。
+
+#### 9.4.2 双机制去重与生命周期管理
+
+- `WatchService` + `polling` 双机制存在重复触发，已有 `refreshLock` + 比较幂等保护，但建议加 **去抖（debounce）窗口**统一收敛；
+- `ScheduledExecutorService` 与 watch 线程应在 `@PreDestroy` 中优雅关闭，避免容器关闭时泄漏。
+
+#### 9.4.3 可观测性
+
+通过 Micrometer 暴露：`cred.refresh.lastTime`、`cred.refresh.count`、`cred.refresh.failure.count`、`cred.verify.failed`，便于在 Grafana 监控轮转健康度。
+
+### 9.5 安全补充
+
+- 挂载 Secret 默认 `0644`，建议 `defaultMode: 0400` + Pod `securityContext.fsGroup`；
+- ESO `SecretStore` 的 Vault 认证优先用 **短期 token + bound ServiceAccount**，禁用静态 token；
+- 方案代码仅日志记录 `username`（未泄露密码，良好）；`reconfigureDataSource` 失败的异常栈中**含 `Properties`**，catch 时注意脱敏，避免密码进入日志。
+
+### 9.6 结论
+
+整体架构（**Vault Static Role → ESO → K8s Secret → UCP `reconfigureDataSource` 平滑重配**）方向正确、链路清晰，UCP `reconfigureDataSource(Properties)` API 选型准确。但距离生产可用仍需：①修复 9.2 的 3 个正确性问题（lazy 包装/启动时序/验证误判）；②补齐 9.3 的 4 项遗漏（Rootless、插件部署、最小权限、starter 依赖）；③采纳 9.4 的虚拟线程与可观测性建议。
+
+---
+
 # 关键决策参考资料
 
 ## 1. Vault Static Role 机制与约束
 
 - **HashiCorp Vault Database Secrets Engine - Static Roles**
   - **关键决策支撑**：确认 Static Role 仅轮转密码而不改变用户名；确认 rotation_period 以秒为单位且无 1h 硬下限（生产建议 ≥ 1h）；确认首次创建时立即触发密码轮转；确认 /static-creds/ API 路径。
-  - **参考来源**：Vault Official Documentation > Database Secrets Engine > Static Roles
+  - **参考来源**：[Vault Docs - Database Secrets Engine - Static Roles](https://developer.hashicorp.com/vault/docs/secrets/databases#static-roles) · [Vault API - Static Roles](https://developer.hashicorp.com/vault/api-docs/secret/databases#static-roles)
+
+- **Vault Oracle Database Secrets Engine（含 Rootless / self_managed）**
+  - **关键决策支撑**：确认 Oracle 插件需独立下载注册 + Oracle Instant Client；确认 `self_managed=true` Rootless 配置可免除 root 账号；确认 SSL/TNS/Wallet 连接写法。
+  - **参考来源**：[Vault Docs - Oracle Database Secrets Engine](https://developer.hashicorp.com/vault/docs/secrets/databases/oracle)
 
 - **Vault Root Credential Rotation API**
   - **关键决策支撑**：确认 root/admin 账号不应使用 Static Role，而应通过专用 database/rotate-root/&lt;name&gt; 端点单独管理，避免连接配置失效。
-  - **参考来源**：Vault API Documentation > Database > Rotate Root Credentials
+  - **参考来源**：[Vault API - Rotate Root Credentials](https://developer.hashicorp.com/vault/api-docs/secret/databases#rotate-root-credentials)
 
 ## 2. Oracle UCP 热更新能力
 
 - **Oracle Universal Connection Pool (UCP) Developer's Guide**
   - **关键决策支撑**：确认 `PoolDataSource.reconfigureDataSource(Properties)` 可在不销毁连接池对象的前提下平滑切换凭据；确认旧连接被标记为过期、新连接使用新凭据的行为语义。**该方法签名需传入 `Properties` 参数且抛 `SQLException`，不存在无参重载。**
-  - **参考来源**：Oracle Database JDBC & UCP Documentation > UCP Pool Reconfiguration
+  - **参考来源**：[Oracle UCP Developer's Guide (23)](https://docs.oracle.com/en/database/oracle/oracle-database/23/jjucp/index.html) · [Managing UCP Connections](https://docs.oracle.com/en/database/oracle/oracle-database/23/jjucp/managing-connections.html)
 
 - **Spring Boot DataSource Auto-Configuration**
-  - **关键决策支撑**：确认 `spring.datasource.type=oracle.ucp.jdbc.PoolDataSource` 可被 Spring Boot 自动装配识别；**确认 UCP 专有属性需使用 `spring.datasource.oracleucp.*` 前缀（由 Oracle Spring Boot Starter 绑定），`spring.datasource.ucp.*` 不被原生支持。**
-  - **参考来源**：Spring Boot Reference Documentation > Data Access > DataSource Configuration
+  - **关键决策支撑**：确认 `spring.datasource.type=oracle.ucp.jdbc.PoolDataSource` 可被 Spring Boot 自动装配识别；**确认 UCP 专有属性需使用 `spring.datasource.oracleucp.*` 前缀（由 Oracle Spring Boot Starter 绑定），`spring.datasource.ucp.*` 不被原生支持；确认 4.1 新增 `connection-fetch=lazy` 会以 `LazyConnectionDataSourceProxy` 包装池，影响 `instanceof` 判断。**
+  - **参考来源**：[Spring Boot 4.1 Reference - Data Access](https://docs.spring.io/spring-boot/docs/4.1.0/reference/htmlsingle/#data.sql.datasource) · [Spring Boot 4.1 Release Notes](https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-4.1-Release-Notes)
 
 ## 3. External Secrets Operator (ESO) API 演进
 
-- **ESO v1 API GA 版本**
-  - **关键决策支撑**：确认 `external-secrets.io/v1` 自 **v0.10.0 引入**、**v0.10.3 GA**；使用 v1 API 需 ESO ≥ 0.10.3。v1beta1 在后续版本废弃。此前 v0.9.x 仍以 v1beta1 为主力 API（彼时 v1 尚未存在）。
-  - **参考来源**：ESO GitHub Releases & Official Migration Documentation
+- **ESO v1 API GA 与版本演进**
+  - **关键决策支撑**：`external-secrets.io/v1` 自 v0.10.0 引入、v0.10.3 GA；但**截至 2026-07 Operator 已发布至 v2.4.1**（v1beta1 已废弃）。建议基线锁定 v2.x，YAML 中 `apiVersion: external-secrets.io/v1` 不变。
+  - **参考来源**：[ESO GitHub Releases](https://github.com/external-secrets/external-secrets/releases) · [ESO Docs 首页](https://external-secrets.io/latest/)
 
 - **ESO Vault Provider - Static Credentials**
   - **关键决策支撑**：确认 ESO Vault Provider 支持 database/static-creds/ 路径的 remoteRef.key 配置，以及 refreshInterval 与 Vault TTL/rotation_period 的配合策略。
-  - **参考来源**：ESO Documentation > Providers > HashiCorp Vault
+  - **参考来源**：[ESO Docs - HashiCorp Vault Provider](https://external-secrets.io/latest/provider/hashicorp-vault/)
 
 ## 4. Kubernetes Secret 挂载与文件监听
 
 - **Kubernetes Secrets - Mounted Secrets Update Mechanism**
-  - **关键决策支撑**：确认 K8s 更新 mounted Secret 时使用 symlink 原子替换（..data → ..2024_XX_XX），而非原地修改文件内容；确认 WatchService 必须监听目录而非单个文件才能捕获此行为。
-  - **参考来源**：Kubernetes Official Docs > ConfigMaps and Secrets > Using Secrets as Files
+  - **关键决策支撑**：确认 K8s 更新 mounted Secret 时使用 symlink 原子替换（..data → ..<timestamp>），而非原地修改文件内容；更新传播存在最长等同 kubelet 同步周期的延迟；WatchService 必须监听目录而非单个文件才能捕获此行为。
+  - **参考来源**：[Kubernetes Docs - Secrets - Mounted Secrets are updated automatically](https://kubernetes.io/docs/concepts/configuration/secret/#mounted-secrets-are-updated-automatically)
 
-- **JDK 21 Virtual Threads Specification (JEP 444)**
-  - **关键决策支撑**：确认虚拟线程适用于阻塞型 I/O 任务（如 WatchService.take()、Files.readString()）；确认 Thread.ofVirtual().factory() 可用于 ScheduledExecutorService 以避免平台线程泄漏。
-  - **参考来源**：OpenJDK JEP 444: Virtual Threads
+- **JDK Virtual Threads 规范与钉住限制**
+  - **关键决策支撑**：JEP 444（JDK 21）确认虚拟线程适用于阻塞型 I/O 任务，但 `synchronized` 代码块/原生阻塞会钉住载体线程；`WatchService.take()` 属原生阻塞，钉住问题要到 **JEP 491（JDK 24）** 才解除。`Thread.ofVirtual().factory()` 可用于 `ScheduledExecutorService`。
+  - **参考来源**：[JEP 444: Virtual Threads](https://openjdk.org/jeps/444) · [JEP 491: Synchronize Virtual Threads without Pinning](https://openjdk.org/jeps/491)
 
 ## 5. Spring Boot 4 兼容性
 
 - **Spring Framework 7 / Spring Boot 4 已验证项**
   - **关键决策支撑**：本项目已升级至 Spring Boot 4.1.0（经 openrewrite UpgradeSpringBoot_4_0 + properties-migrator 迁移）；确认虚拟线程可作为默认 Web 容器线程模型；确认 DataSourceBuilder 扩展机制向后兼容；当前独立 Service 实现方式不依赖任何已废弃的内部 API。
-  - **参考来源**：Spring Blog & GitHub Milestone Planning
+  - **参考来源**：[Spring Boot 4.1 Release Notes](https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-4.1-Release-Notes) · [Spring Boot 4.0 升级 Wiki](https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-4.0-Release-Notes)
