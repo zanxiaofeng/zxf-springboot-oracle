@@ -298,6 +298,8 @@ management.health.db.enabled=false
 ```java
 package zxf.logging.springboot.cred;
 
+import java.util.Properties;
+
 /**
  * 不可变凭据载体，天然线程安全
  */
@@ -305,6 +307,14 @@ public record DbCredentials(String username, String password) {
     public boolean isEmpty() {
         return username == null || username.isBlank()
             || password == null || password.isBlank();
+    }
+
+    /** 转为 reconfigureDataSource 所需的 Properties（user/password） */
+    public Properties toProps() {
+        Properties props = new Properties();
+        props.setProperty("user", username());
+        props.setProperty("password", password());
+        return props;
     }
 }
 ```
@@ -437,7 +447,6 @@ import org.springframework.stereotype.Component;
 import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.SQLException;
-import java.util.Properties;
 
 /**
  * 凭据应用器：把新凭据安全切换到 UCP 连接池（reconfigureDataSource + 多次借连验证）。
@@ -480,7 +489,7 @@ public class UcpCredentialApplier {
         }
         try {
             log.info("Refreshing UCP credentials for user: {}", creds.username());
-            poolDataSource.reconfigureDataSource(toProps(creds));
+            poolDataSource.reconfigureDataSource(creds.toProps());
             if (!verifyNewCredentials()) {
                 // 失败不回退——旧连接仍可服务，等待下一轮重试
                 log.error("Credential verification FAILED; old connections may still be served, will retry next cycle");
@@ -496,13 +505,6 @@ public class UcpCredentialApplier {
             log.error("Failed to refresh UCP credentials: {}", e.toString());
             return false;
         }
-    }
-
-    private static Properties toProps(DbCredentials creds) {
-        Properties props = new Properties();
-        props.setProperty("user", creds.username());
-        props.setProperty("password", creds.password());
-        return props;
     }
 
     /**

@@ -29,7 +29,7 @@ public class DynamicCredentialRefresher {
         }
         watcher.onChange(this::refresh);   // 先注册回调，再启动，确保不漏首次变化
         watcher.start();
-        refresh();                         // 启动即对齐一次（凭据已由 BootstrapInitializer 注入）
+        refresh();                         // 启动即对齐一次（凭据已由 ContextInitializer 注入）
         log.info("Dynamic credential refresher started");
     }
 
