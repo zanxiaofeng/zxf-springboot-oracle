@@ -31,7 +31,7 @@ vault write sys/plugins/catalog/database/vault-plugin-database-oracle \
 
 ### 2.2 推荐配置：Rootless（`self_managed=true`）
 
-> **修复 §9.3.1**：官方推荐 Rootless 配置——`database/config` 无需任何特权 root 账号，每个 static role 自带独立连接，**最小权限**。本方案原 `vault_admin` 高权账号方案不推荐，仅作 fallback 留在 2.3。
+> **推荐采用 Rootless 配置**：`database/config` 无需任何特权 root 账号，每个 static role 自带独立连接，**最小权限**。`vault_admin` 高权账号方案不推荐，仅作 fallback 留在 2.3。
 
 ```bash
 vault secrets enable database
@@ -145,7 +145,7 @@ spec:
         app: springboot-app
     spec:
       serviceAccountName: eso-sa
-      # §9.5：以 fsGroup 让挂载的 Secret 文件对非 root 容器可读
+      # 以 fsGroup 让挂载的 Secret 文件对非 root 容器可读
       securityContext:
         runAsNonRoot: true
         fsGroup: 10001
@@ -175,7 +175,7 @@ spec:
         - name: secrets
           secret:
             secretName: oracle-credentials
-            # §9.5：收紧挂载文件权限（默认 0644 → 0400，仅属主可读）
+            # 收紧挂载文件权限（默认 0644 → 0400，仅属主可读）
             defaultMode: 0400
 ```
 
@@ -209,7 +209,7 @@ spec:
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-actuator</artifactId>
     </dependency>
-    <!-- §9.3.4：绑定 spring.datasource.oracleucp.* 前缀，否则 oracleucp 调优项被原生忽略 -->
+    <!-- 绑定 spring.datasource.oracleucp.* 前缀，否则 oracleucp 调优项被原生忽略 -->
     <dependency>
         <groupId>com.oracle.database.spring</groupId>
         <artifactId>oracle-spring-boot-starter-datasource</artifactId>
@@ -294,7 +294,7 @@ public record DbCredentials(String username, String password) {
 
 ### 6.2 启动期凭据注入（BootstrapRegistryInitializer）
 
-> **修复 §9.2.2（启动时序）**：原方案在 `ApplicationReadyEvent` 才加载真实凭据，但 Flyway/Liquibase、JPA `ddl-auto` 等在上下文刷新阶段（更早）即借连接，会以 `PLACEHOLDER` 建连失败。
+> **启动时序处理**：原方案在 `ApplicationReadyEvent` 才加载真实凭据，但 Flyway/Liquibase、JPA `ddl-auto` 等在上下文刷新阶段（更早）即借连接，会以 `PLACEHOLDER` 建连失败。
 > 解法：在 **`ApplicationEnvironmentPreparedEvent`**（环境已就绪、上下文尚未创建）把 `/etc/secrets/db` 中的 username/password 以最高优先级注入 `Environment`，使自动装配出的 `PoolDataSource` 一开始就持有真实凭据。
 >
 > ⚠️ **注意**：Spring Boot 4.0 已**废弃并标记移除** `EnvironmentPostProcessor`，官方替代是 `BootstrapRegistryInitializer`（通过 bootstrap 注册表挂载 `ApplicationListener`）。下方采用官方推荐写法。
@@ -365,7 +365,7 @@ zxf.logging.springboot.cred.CredentialBootstrapInitializer
 
 ### 6.3 运行期热刷（DynamicCredentialRefresher）
 
-> 已应用修正：**§9.2.1** `unwrap` 取真实 `PoolDataSource`（兼容 `connection-fetch=lazy` 包装）；**§9.2.3** 强化验证（reconfigure 后旧连接未立即销毁，需多次借连确认新凭据可用）；**§9.4.1** watch 循环改用平台线程（`WatchService.take()` 原生阻塞，JDK21 钉住载体，JEP 491/JDK24 才修复）；**§9.4.2** 去抖 + `@PreDestroy` 优雅关闭；**§9.5** 异常脱敏（异常栈含 `Properties`/密码，仅记录 `toString`）。
+> 设计要点：① `unwrap` 取真实 `PoolDataSource`（兼容 `connection-fetch=lazy` 包装）；② 强化验证（reconfigure 后旧连接未立即销毁，需多次借连确认新凭据可用）；③ watch 循环用平台线程（`WatchService.take()` 原生阻塞，JDK21 钉住载体，JEP 491/JDK24 才修复）；④ 去抖 + `@PreDestroy` 优雅关闭；⑤ 异常脱敏（异常栈含 `Properties`/密码，仅记录 `toString`）。
 
 ```java
 package zxf.logging.springboot.cred;
@@ -413,7 +413,7 @@ public class DynamicCredentialRefresher {
     /** 上次成功应用的凭据缓存；用于变更比较，避免调用已废弃的 PoolDataSource.getPassword() */
     private volatile DbCredentials lastApplied = new DbCredentials(null, null);
 
-    // §9.4.3 可观测性：轮转健康度指标，供 Prometheus/Grafana 监控
+    // 可观测性：轮转健康度指标，供 Prometheus/Grafana 监控
     private final MeterRegistry meterRegistry;
     private final AtomicLong lastRefreshEpoch = new AtomicLong(0);
     private Counter refreshSuccess;
@@ -432,7 +432,7 @@ public class DynamicCredentialRefresher {
             DataSource dataSource,
             MeterRegistry meterRegistry,
             @Value("${DB_CRED_DIR:/etc/secrets/db}") String credDirPath) throws IOException {
-        // §9.2.1 修复：DataSource 可能被 LazyConnectionDataSourceProxy 包装，需 unwrap 到真实 PoolDataSource
+        // DataSource 可能被 LazyConnectionDataSourceProxy 包装，需 unwrap 到真实 PoolDataSource
         this.poolDataSource = dataSource.isWrapperFor(PoolDataSource.class)
                 ? dataSource.unwrap(PoolDataSource.class)
                 : (PoolDataSource) dataSource;
@@ -530,7 +530,7 @@ public class DynamicCredentialRefresher {
             poolDataSource.reconfigureDataSource(props);
 
             if (!verifyNewCredentials()) {
-                // §9.2.3：失败不回退——旧连接仍可服务，等待下一轮重试
+                // 失败不回退——旧连接仍可服务，等待下一轮重试
                 verifyFailure.increment();
                 log.error("Credential verification FAILED; old connections may still be served, will retry next cycle");
                 return;
@@ -545,7 +545,7 @@ public class DynamicCredentialRefresher {
                     poolDataSource.getBorrowedConnectionsCount(),
                     poolDataSource.getAvailableConnectionsCount());
         } catch (Exception e) {
-            // §9.5：异常栈含 Properties（含密码），仅记录消息，避免密码进入日志
+            // 异常栈含 Properties（含密码），仅记录消息，避免密码进入日志
             refreshFailure.increment();
             log.error("Failed to refresh UCP credentials: {}", e.toString());
         } finally {
@@ -554,7 +554,7 @@ public class DynamicCredentialRefresher {
     }
 
     /**
-     * §9.2.3 修复：reconfigureDataSource 后，池中旧连接被标记过期但不会立即销毁，
+     * reconfigureDataSource 后，池中旧连接被标记过期但不会立即销毁，
      * 紧接着借一条可能分到旧连接（旧密码仍有效）→ 误判。
      * 解法：连续借多条并 isValid，确认至少能以新凭据成功建连。
      */
