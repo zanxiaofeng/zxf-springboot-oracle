@@ -5,6 +5,8 @@ spring:
     password: 123456
     driver-class-name: oracle.jdbc.OracleDriver
     type: oracle.ucp.jdbc.PoolDataSource
+    # eager（默认）：避免 LazyConnectionDataSourceProxy 包装池，凭据热刷新代码直接 unwrap 拿到 PoolDataSource
+    connection-fetch: eager
     oracleucp:
       connection-factory-class-name: oracle.jdbc.pool.OracleDataSource
       connection-pool-name: pool-test
@@ -24,3 +26,12 @@ spring:
         oracle.jdbc.defaultLobPrefetchSize: 4000
         oracle.net.keepAlive: true
         oracle.net.TCP_KEEPIDLE: 60
+
+management:
+  endpoint:
+    health:
+      show-details: always
+  health:
+    db:
+      # 关闭默认 db 健康检查，改用自定义 dynamicDbHealth，避免与凭据热刷新竞争借连接
+      enabled: false

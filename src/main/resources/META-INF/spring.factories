@@ -1,0 +1,3 @@
+# Boot 4 通过 SpringFactoriesLoader 读 META-INF/spring.factories 加载 ApplicationContextInitializer，
+# 在 refresh 前把 K8s 挂载凭据注入 Environment（覆盖 application.yml）
+org.springframework.context.ApplicationContextInitializer=zxf.logging.springboot.cred.CredentialContextInitializer

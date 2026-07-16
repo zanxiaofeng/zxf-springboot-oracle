@@ -9,7 +9,7 @@
 | Oracle UCP | 23.26.x（`ucp17`） | 支持 `reconfigureDataSource(Properties)` |
 | Oracle JDBC | 23.26.x（`ojdbc17`） | 与 UCP 后缀必须一致（同为 `17`） |
 | Vault | 1.18+（Oracle 插件 0.12.x） | Database Secrets Engine (Static Roles)，支持 `self_managed=true` Rootless |
-| Oracle Spring Boot Starter | 3.x（`oracle-spring-boot-starter-datasource`） | 绑定 `spring.datasource.oracleucp.*` 前缀（§5.2） |
+| Oracle Spring Boot Starter | 25.3.0（`oracle-spring-boot-starter-ucp`） | 绑定 `spring.datasource.oracleucp.*` 前缀（§5.2）；注意 artifactId 是 `-ucp` 而非 `-datasource` |
 | ESO | **v2.x**（2026-07 最新 v2.4.1） | `external-secrets.io/v1` API 已稳定；v1beta1 废弃。原 `0.10.3` 仅为 v1 GA 历史最低线 |
 | Kubernetes | 1.27+ | 支持 ReadWriteOncePod |
 
@@ -198,6 +198,7 @@ spec:
 <properties>
     <java.version>21</java.version>
     <oracle-jdbc.version>23.26.2.0.0</oracle-jdbc.version>
+    <oracle-spring.version>25.3.0</oracle-spring.version>
 </properties>
 
 <dependencies>
@@ -215,10 +216,11 @@ spec:
         <artifactId>spring-boot-starter-actuator</artifactId>
     </dependency>
     <!-- 绑定 spring.datasource.oracleucp.* 前缀，否则 oracleucp 调优项被原生忽略 -->
+    <!-- 注意：Oracle 的 starter artifactId 是 oracle-spring-boot-starter-ucp（无 -datasource 变体） -->
     <dependency>
         <groupId>com.oracle.database.spring</groupId>
-        <artifactId>oracle-spring-boot-starter-datasource</artifactId>
-        <version>3.5.0</version>
+        <artifactId>oracle-spring-boot-starter-ucp</artifactId>
+        <version>${oracle-spring.version}</version>
     </dependency>
     <!-- ojdbc17 与 ucp17 后缀必须一致，版本由 ojdbc-bom 统一管理 -->
     <dependency>
@@ -256,16 +258,16 @@ spec:
 
 ### 5.2 application.properties
 
-> ⚠️ Spring Boot **原生不支持** `spring.datasource.ucp.*` 命名空间。UCP 专有属性需通过 Oracle 官方 starter 绑定的 **`spring.datasource.oracleucp.*`** 前缀（需引入 `com.oracle.database.spring:oracle-spring-boot-starter-datasource`，见 §5.1），或自定义 `PoolDataSource` Bean。
+> ⚠️ Spring Boot **原生不支持** `spring.datasource.ucp.*` 命名空间。UCP 专有属性需通过 Oracle 官方 starter 绑定的 **`spring.datasource.oracleucp.*`** 前缀（需引入 `com.oracle.database.spring:oracle-spring-boot-starter-ucp`，见 §5.1），或自定义 `PoolDataSource` Bean。
 >
-> 启动凭据由 §6.2 的 `CredentialBootstrapInitializer` 在上下文创建前以最高优先级注入 `spring.datasource.username/password`，覆盖下方 PLACEHOLDER，确保 Flyway/JPA 启动阶段即用真实凭据。
+> 启动凭据由 §6.2 的 `CredentialContextInitializer` 在上下文创建前以最高优先级注入 `spring.datasource.username/password`，覆盖下方 PLACEHOLDER，确保 Flyway/JPA 启动阶段即用真实凭据。
 
 ```properties
 spring.datasource.url=jdbc:oracle:thin:@//oracle:1521/XEPDB1
 spring.datasource.driver-class-name=oracle.jdbc.OracleDriver
 spring.datasource.type=oracle.ucp.jdbc.PoolDataSource
 
-# dev 兜底占位符：K8s 环境下会被 §6.2 BootstrapInitializer 注入的真实凭据覆盖
+# dev 兜底占位符：K8s 环境下会被 §6.2 ContextInitializer 注入的真实凭据覆盖
 spring.datasource.username=PLACEHOLDER
 spring.datasource.password=PLACEHOLDER
 
@@ -307,7 +309,7 @@ public record DbCredentials(String username, String password) {
 }
 ```
 
-文件源（单一职责：定位文件、判断可用性、读取凭据、报告 mtime）。既可作 Spring Bean 供运行期热刷注入，也可被 `BootstrapInitializer` 在上下文创建前直接 `new`：
+文件源（单一职责：定位文件、判断可用性、读取凭据、报告 mtime）。既可作 Spring Bean 供运行期热刷注入，也可被 `ContextInitializer` 在上下文创建前直接 `new`：
 
 ```java
 package zxf.logging.springboot.cred;
@@ -353,63 +355,62 @@ public class CredentialFileSource {
 }
 ```
 
-### 6.2 启动期凭据注入（BootstrapRegistryInitializer）
+### 6.2 启动期凭据注入（ApplicationContextInitializer）
 
-> **启动时序处理**：原方案在 `ApplicationReadyEvent` 才加载真实凭据，但 Flyway/Liquibase、JPA `ddl-auto` 等在上下文刷新阶段（更早）即借连接，会以 `PLACEHOLDER` 建连失败。
-> 解法：在 **`ApplicationEnvironmentPreparedEvent`**（环境已就绪、上下文尚未创建）把 `/etc/secrets/db` 中的 username/password 以最高优先级注入 `Environment`，使自动装配出的 `PoolDataSource` 一开始就持有真实凭据。
+> **启动时序处理**：若仅在 `ApplicationReadyEvent` 才加载真实凭据，Flyway/Liquibase、JPA `ddl-auto` 等在上下文刷新阶段（更早）即借连接，会用 `PLACEHOLDER` 建连失败。
+> 解法：用 `ApplicationContextInitializer` 在**上下文 refresh 前**把 `/etc/secrets/db` 中的 username/password 以最高优先级注入 `Environment`，使自动装配出的 `PoolDataSource` 一开始就持有真实凭据。
 >
-> ⚠️ **注意**：Spring Boot 4.0 已**废弃并标记移除** `EnvironmentPostProcessor`，官方替代是 `BootstrapRegistryInitializer`（通过 bootstrap 注册表挂载 `ApplicationListener`）。下方采用官方推荐写法。
+> ⚠️ **Boot 4.1 选型说明**：
+> - `EnvironmentPostProcessor` 已废弃（marked for removal）；
+> - `BootstrapRegistryInitializer` 在 4.1 已**移除 `addApplicationListener`**（仅剩 `addCloseListener`），无法挂载环境事件监听；
+> - 故改用 Spring Framework 核心且稳定的 `ApplicationContextInitializer`，时机同样早于 refresh（DataSource/Flyway/JPA 建连）。
 
 ```java
 package zxf.logging.springboot.cred;
 
-import org.springframework.boot.BootstrapRegistry;
-import org.springframework.boot.BootstrapRegistryInitializer;
-import org.springframework.boot.context.event.ApplicationEnvironmentPreparedEvent;
+import org.springframework.context.ApplicationContextInitializer;
+import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.core.env.MapPropertySource;
 
 import java.util.Map;
 
 /**
- * Spring Boot 4 替代废弃的 EnvironmentPostProcessor。
- * 在 ApplicationEnvironmentPreparedEvent（上下文创建前）把 K8s 挂载的凭据
- * 注入 Environment 最高优先级，覆盖 application.yml 中的 PLACEHOLDER，
- * 确保 Flyway/JPA 启动阶段即用真实凭据。dev（无挂载）时静默回退。
+ * 在上下文 refresh 前（ApplicationContextInitializer）把 K8s 挂载的 Vault Static Role 凭据
+ * 注入 Environment 最高优先级，覆盖 application.yml，确保 DataSource/Flyway/JPA 启动即用真实凭据。
+ * dev（无挂载文件）时静默回退到 application.yml。
  */
-public class CredentialBootstrapInitializer implements BootstrapRegistryInitializer {
+public class CredentialContextInitializer implements ApplicationContextInitializer<ConfigurableApplicationContext> {
 
     @Override
-    public void initialize(BootstrapRegistry registry) {
-        registry.addApplicationListener((ApplicationEnvironmentPreparedEvent event) -> {
-            ConfigurableEnvironment env = event.getEnvironment();
-            // 上下文创建前无 Bean 可注入，直接 new 文件源（与运行期共享同一读取逻辑）
-            CredentialFileSource source = new CredentialFileSource(
-                    env.getProperty("DB_CRED_DIR", "/etc/secrets/db"));
-            if (!source.isAvailable()) {
-                return; // dev/无挂载：回退到 application.yml
+    public void initialize(ConfigurableApplicationContext applicationContext) {
+        ConfigurableEnvironment env = applicationContext.getEnvironment();
+        // 上下文创建前无 Bean 可注入，直接 new 文件源（与运行期共享同一读取逻辑）
+        CredentialFileSource source = new CredentialFileSource(
+                env.getProperty("DB_CRED_DIR", "/etc/secrets/db"));
+        if (!source.isAvailable()) {
+            return; // dev/无挂载：回退到 application.yml
+        }
+        try {
+            DbCredentials creds = source.read();
+            if (!creds.isEmpty()) {
+                env.getPropertySources().addFirst(new MapPropertySource(
+                        "vaultStaticCreds",
+                        Map.of(
+                                "spring.datasource.username", creds.username(),
+                                "spring.datasource.password", creds.password())));
             }
-            try {
-                DbCredentials creds = source.read();
-                if (!creds.isEmpty()) {
-                    env.getPropertySources().addFirst(new MapPropertySource(
-                            "vaultStaticCreds",
-                            Map.of(
-                                    "spring.datasource.username", creds.username(),
-                                    "spring.datasource.password", creds.password())));
-                }
-            } catch (Exception ignored) {
-                // 读取失败不阻断启动：交由后续 DataSource 建连时报错暴露
-            }
-        });
+        } catch (Exception ignored) {
+            // 读取失败不阻断启动：交由后续 DataSource 建连时报错暴露
+        }
     }
 }
 ```
 
-注册文件 `src/main/resources/META-INF/spring/org.springframework.boot.BootstrapRegistryInitializer.imports`：
+注册文件 `src/main/resources/META-INF/spring.factories`（Boot 4 经 `SpringFactoriesLoader` 加载 `ApplicationContextInitializer`，**不是** `.imports`）：
 
 ```
-zxf.logging.springboot.cred.CredentialBootstrapInitializer
+org.springframework.context.ApplicationContextInitializer=zxf.logging.springboot.cred.CredentialContextInitializer
 ```
 
 ### 6.3 运行期热刷
@@ -435,6 +436,7 @@ import org.springframework.stereotype.Component;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
+import java.sql.SQLException;
 import java.util.Properties;
 
 /**
@@ -454,9 +456,13 @@ public class UcpCredentialApplier {
 
     public UcpCredentialApplier(DataSource dataSource) {
         // DataSource 可能被 LazyConnectionDataSourceProxy 包装，需 unwrap 到真实 PoolDataSource
-        this.poolDataSource = dataSource.isWrapperFor(PoolDataSource.class)
-                ? dataSource.unwrap(PoolDataSource.class)
-                : (PoolDataSource) dataSource;
+        try {
+            this.poolDataSource = dataSource.isWrapperFor(PoolDataSource.class)
+                    ? dataSource.unwrap(PoolDataSource.class)
+                    : (PoolDataSource) dataSource;
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to unwrap UCP PoolDataSource", e);
+        }
     }
 
     /**
@@ -600,6 +606,8 @@ public class SecretChangeWatcher {
             }
         } catch (ClosedWatchServiceException e) {
             log.info("WatchService closed gracefully");
+        } catch (IOException e) {
+            log.error("WatchService register/loop failed, polling remains active", e);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             log.info("Watcher interrupted, polling remains active");
@@ -671,9 +679,14 @@ public class DynamicCredentialRefresher {
 
     @EventListener(ApplicationReadyEvent.class)
     public void start() {
+        // 本地 dev：无挂载的凭据目录，跳过热刷新，沿用 application.yml 凭据
+        if (!credSource.isAvailable()) {
+            log.info("Credential dir not available, skipping hot-reload; using datasource creds from config");
+            return;
+        }
         watcher.onChange(this::refresh);   // 先注册回调，再启动，确保不漏首次变化
         watcher.start();
-        refresh();                         // 启动即对齐一次（凭据已由 BootstrapInitializer 注入）
+        refresh();                         // 启动即对齐一次（凭据已由 ContextInitializer 注入）
         log.info("Dynamic credential refresher started");
     }
 
@@ -696,8 +709,8 @@ package zxf.logging.springboot.cred;
 
 import oracle.ucp.jdbc.PoolDataSource;
 import lombok.RequiredArgsConstructor;
-import org.springframework.boot.actuate.health.Health;
-import org.springframework.boot.actuate.health.HealthIndicator;
+import org.springframework.boot.health.contributor.Health;
+import org.springframework.boot.health.contributor.HealthIndicator;
 import org.springframework.stereotype.Component;
 
 import javax.sql.DataSource;
