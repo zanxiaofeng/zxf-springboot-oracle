@@ -8,34 +8,70 @@
 | Spring Boot | 4.1.0 | 已迁移完成（openrewrite + properties-migrator） |
 | Oracle UCP | 23.26.x（`ucp17`） | 支持 `reconfigureDataSource(Properties)` |
 | Oracle JDBC | 23.26.x（`ojdbc17`） | 与 UCP 后缀必须一致（同为 `17`） |
-| Vault | 1.15+ | Database Secrets Engine (Static Roles) |
-| ESO | 0.10.3+ | `external-secrets.io/v1` 自该版本 GA |
+| Vault | 1.18+（Oracle 插件 0.12.x） | Database Secrets Engine (Static Roles)，支持 `self_managed=true` Rootless |
+| Oracle Spring Boot Starter | 3.x（`oracle-spring-boot-starter-datasource`） | 绑定 `spring.datasource.oracleucp.*` 前缀（§5.2） |
+| ESO | **v2.x**（2026-07 最新 v2.4.1） | `external-secrets.io/v1` API 已稳定；v1beta1 废弃。原 `0.10.3` 仅为 v1 GA 历史最低线 |
 | Kubernetes | 1.27+ | 支持 ReadWriteOncePod |
 
 ## 2. Vault Static Role 配置（Oracle）
 
+### 2.1 前置：插件与 Instant Client（生产部署易漏）
+
+Vault 默认**不含** Oracle 插件，必须先注册并在 Vault 主机安装 Oracle Instant Client：
+
 ```bash
-# 启用数据库密钥引擎
+# 1. 注册插件到 catalog（需带 sha256）
+vault write sys/plugins/catalog/database/vault-plugin-database-oracle \
+  sha256="<二进制 sha256>" \
+  command=vault-plugin-database-oracle
+
+# 2. Vault 主机安装 Oracle Instant Client（libclntsh 置于 ld.so.conf 路径，ldconfig 刷新）
+#    Enterprise 插件 0.12.x+ 对应 Instant Client 19.26
+```
+
+### 2.2 推荐配置：Rootless（`self_managed=true`）
+
+> **修复 §9.3.1**：官方推荐 Rootless 配置——`database/config` 无需任何特权 root 账号，每个 static role 自带独立连接，**最小权限**。本方案原 `vault_admin` 高权账号方案不推荐，仅作 fallback 留在 2.3。
+
+```bash
 vault secrets enable database
 
-# 配置 Oracle 连接（管理账号，用于执行密码轮转）
-# {{username}}/{{password}} 为 Vault 动态注入占位符，下方 username/password 才是管理账号
+# Rootless：不传 username/password，加 self_managed=true
 vault write database/config/oracle \
-  plugin_name=oracle-database-plugin \
+  plugin_name="vault-plugin-database-oracle" \
   connection_url="{{username}}/{{password}}@//oracle:1521/XEPDB1" \
-  username="vault_admin" \
-  password="admin123"
+  self_managed=true \
+  allowed_roles="app-fixed-user"
 
-# ⚠️ 关键区别：使用 static-roles 而非 roles
-# username 为数据库中已存在的固定用户
-# rotation_period 控制密码自动轮转周期（秒），生产建议 ≥ 1h；Vault 并无 1h 硬下限
+# Static Role：Rootless 模式需带初始 password；username 为 DB 已存在的固定用户
+# rotation_period 单位为秒，生产建议 ≥ 1h；Vault 并无 1h 硬下限
 vault write database/static-roles/app-fixed-user \
   db_name=oracle \
   username="APP_USER" \
+  password="<初始密码>" \
   rotation_period="24h"
 ```
 
-> **Static Role 核心行为**：Vault 每 24 小时自动调用 Oracle 修改 APP_USER 的密码。应用通过 `/static-creds/app-fixed-user` 获取当前有效密码，用户名始终为 APP_USER。
+> **Rootless 权衡**：不支持 dynamic roles（本方案不需要）；若发生带外密码修改，Vault 与 DB 会失步需手动同步。
+
+### 2.3 最小授权（管理账号方案 / fallback）
+
+若必须用管理账号（非 Rootless），Static Role 仅做密码轮转，管理账号**至少**需 `ALTER USER`：
+
+```sql
+-- 最小：仅密码轮转
+GRANT ALTER USER TO vault_admin WITH ADMIN OPTION;
+GRANT CREATE SESSION TO vault_admin;
+-- 可选：revoke 时终止会话
+GRANT SELECT ON gv_$session TO vault_admin;
+GRANT ALTER SYSTEM TO vault_admin;   -- 仅当需要 KILL SESSION
+```
+
+> 动态角色才需 `CREATE USER / DROP USER`。**禁止对 root/admin 账号使用 Static Role**（轮转后 config 连接立即失效，全部凭据操作瘫痪）。
+
+### 2.4 Static Role 核心行为
+
+> Vault 每 24 小时自动调用 Oracle 修改 APP_USER 的密码。应用通过 `/static-creds/app-fixed-user` 获取当前有效密码，用户名始终为 APP_USER。
 
 ## 3. ESO 与 K8s Secret
 
@@ -109,6 +145,10 @@ spec:
         app: springboot-app
     spec:
       serviceAccountName: eso-sa
+      # §9.5：以 fsGroup 让挂载的 Secret 文件对非 root 容器可读
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 10001
       initContainers:
         - name: wait-for-secrets
           image: busybox:1.36
@@ -135,6 +175,8 @@ spec:
         - name: secrets
           secret:
             secretName: oracle-credentials
+            # §9.5：收紧挂载文件权限（默认 0644 → 0400，仅属主可读）
+            defaultMode: 0400
 ```
 
 ## 5. Spring Boot 配置
@@ -162,10 +204,16 @@ spec:
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-jdbc</artifactId>
     </dependency>
-    <!-- 健康检查与 actuator 端点（6.3 节依赖） -->
+    <!-- 健康检查与 actuator 端点（6.4 节依赖） -->
     <dependency>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
+    <!-- §9.3.4：绑定 spring.datasource.oracleucp.* 前缀，否则 oracleucp 调优项被原生忽略 -->
+    <dependency>
+        <groupId>com.oracle.database.spring</groupId>
+        <artifactId>oracle-spring-boot-starter-datasource</artifactId>
+        <version>3.5.0</version>
     </dependency>
     <!-- ojdbc17 与 ucp17 后缀必须一致，版本由 ojdbc-bom 统一管理 -->
     <dependency>
@@ -197,16 +245,22 @@ spec:
 
 ### 5.2 application.properties
 
-> ⚠️ Spring Boot **原生不支持** `spring.datasource.ucp.*` 命名空间。UCP 专有属性需通过 Oracle 官方 starter 绑定的 **`spring.datasource.oracleucp.*`** 前缀（需引入 `com.oracle.database.spring:oracle-spring-boot-starter-datasource`），或自定义 `PoolDataSource` Bean。
+> ⚠️ Spring Boot **原生不支持** `spring.datasource.ucp.*` 命名空间。UCP 专有属性需通过 Oracle 官方 starter 绑定的 **`spring.datasource.oracleucp.*`** 前缀（需引入 `com.oracle.database.spring:oracle-spring-boot-starter-datasource`，见 §5.1），或自定义 `PoolDataSource` Bean。
+>
+> 启动凭据由 §6.2 的 `CredentialBootstrapInitializer` 在上下文创建前以最高优先级注入 `spring.datasource.username/password`，覆盖下方 PLACEHOLDER，确保 Flyway/JPA 启动阶段即用真实凭据。
 
 ```properties
 spring.datasource.url=jdbc:oracle:thin:@//oracle:1521/XEPDB1
 spring.datasource.driver-class-name=oracle.jdbc.OracleDriver
 spring.datasource.type=oracle.ucp.jdbc.PoolDataSource
 
-# 占位符，启动后立即被真实凭据覆盖
+# dev 兜底占位符：K8s 环境下会被 §6.2 BootstrapInitializer 注入的真实凭据覆盖
 spring.datasource.username=PLACEHOLDER
 spring.datasource.password=PLACEHOLDER
+
+# 保持 eager（默认）：懒加载会用 LazyConnectionDataSourceProxy 包装池，§6.3/§6.4 已用 unwrap 兼容；
+# 若显式设 lazy，务必保留 unwrap 逻辑，否则 instanceof PoolDataSource 会失败。
+spring.datasource.connection-fetch=eager
 
 # UCP 调优（需 Oracle Spring Boot Starter 提供 oracleucp 前缀绑定）
 spring.datasource.oracleucp.initial-pool-size=2
@@ -217,7 +271,7 @@ spring.datasource.oracleucp.sql-for-validate-connection=SELECT 1 FROM DUAL
 spring.datasource.oracleucp.connection-wait-timeout=5
 spring.datasource.oracleucp.inactive-connection-timeout=300
 
-# Actuator
+# Actuator：关闭默认 db 健康检查，改用 §6.4 自定义 dynamicDbHealth（避免与热刷竞争借连接）
 management.endpoint.health.show-details=always
 management.health.db.enabled=false
 ```
@@ -238,21 +292,97 @@ public record DbCredentials(String username, String password) {
 }
 ```
 
-### 6.2 动态凭据刷新服务
+### 6.2 启动期凭据注入（BootstrapRegistryInitializer）
+
+> **修复 §9.2.2（启动时序）**：原方案在 `ApplicationReadyEvent` 才加载真实凭据，但 Flyway/Liquibase、JPA `ddl-auto` 等在上下文刷新阶段（更早）即借连接，会以 `PLACEHOLDER` 建连失败。
+> 解法：在 **`ApplicationEnvironmentPreparedEvent`**（环境已就绪、上下文尚未创建）把 `/etc/secrets/db` 中的 username/password 以最高优先级注入 `Environment`，使自动装配出的 `PoolDataSource` 一开始就持有真实凭据。
+>
+> ⚠️ **注意**：Spring Boot 4.0 已**废弃并标记移除** `EnvironmentPostProcessor`，官方替代是 `BootstrapRegistryInitializer`（通过 bootstrap 注册表挂载 `ApplicationListener`）。下方采用官方推荐写法。
 
 ```java
+package zxf.logging.springboot.cred;
+
+import org.springframework.boot.BootstrapRegistry;
+import org.springframework.boot.BootstrapRegistryInitializer;
+import org.springframework.boot.context.event.ApplicationEnvironmentPreparedEvent;
+import org.springframework.context.ApplicationListener;
+import org.springframework.core.env.ConfigurableEnvironment;
+import org.springframework.core.env.MapPropertySource;
+import org.springframework.util.StringUtils;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Map;
+
+/**
+ * Spring Boot 4 替代废弃的 EnvironmentPostProcessor。
+ * 在 ApplicationEnvironmentPreparedEvent（上下文创建前）把 K8s 挂载的凭据
+ * 注入 Environment 最高优先级，覆盖 application.yml 中的 PLACEHOLDER，
+ * 确保 Flyway/JPA 启动阶段即用真实凭据。dev（无挂载）时静默回退。
+ */
+public class CredentialBootstrapInitializer implements BootstrapRegistryInitializer {
+
+    @Override
+    public void initialize(BootstrapRegistry registry) {
+        registry.addApplicationListener(new CredentialEnvironmentInjector());
+    }
+
+    static class CredentialEnvironmentInjector
+            implements ApplicationListener<ApplicationEnvironmentPreparedEvent> {
+
+        @Override
+        public void onApplicationEvent(ApplicationEnvironmentPreparedEvent event) {
+            ConfigurableEnvironment env = event.getEnvironment();
+            String dir = env.getProperty("DB_CRED_DIR", "/etc/secrets/db");
+            Path userFile = Path.of(dir, "username");
+            Path passFile = Path.of(dir, "password");
+            if (!Files.isReadable(userFile) || !Files.isReadable(passFile)) {
+                return; // dev/无挂载：回退到 application.yml
+            }
+            try {
+                String user = Files.readString(userFile).trim();
+                String pass = Files.readString(passFile).trim();
+                if (StringUtils.hasText(user) && StringUtils.hasText(pass)) {
+                    env.getPropertySources().addFirst(new MapPropertySource(
+                            "vaultStaticCreds",
+                            Map.of(
+                                    "spring.datasource.username", user,
+                                    "spring.datasource.password", pass)));
+                }
+            } catch (Exception ignored) {
+                // 读取失败不阻断启动：交由后续 DataSource 建连时报错暴露
+            }
+        }
+    }
+}
+```
+
+注册文件 `src/main/resources/META-INF/spring/org.springframework.boot.BootstrapRegistryInitializer.imports`：
+
+```
+zxf.logging.springboot.cred.CredentialBootstrapInitializer
+```
+
+### 6.3 运行期热刷（DynamicCredentialRefresher）
+
+> 已应用修正：**§9.2.1** `unwrap` 取真实 `PoolDataSource`（兼容 `connection-fetch=lazy` 包装）；**§9.2.3** 强化验证（reconfigure 后旧连接未立即销毁，需多次借连确认新凭据可用）；**§9.4.1** watch 循环改用平台线程（`WatchService.take()` 原生阻塞，JDK21 钉住载体，JEP 491/JDK24 才修复）；**§9.4.2** 去抖 + `@PreDestroy` 优雅关闭；**§9.5** 异常脱敏（异常栈含 `Properties`/密码，仅记录 `toString`）。
+
+```java
+package zxf.logging.springboot.cred;
+
 import oracle.ucp.jdbc.PoolDataSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 
+import jakarta.annotation.PreDestroy;
 import javax.sql.DataSource;
 import java.io.IOException;
 import java.nio.file.*;
+import java.nio.file.attribute.FileTime;
 import java.sql.Connection;
 import java.time.Instant;
 import java.util.Properties;
@@ -266,101 +396,98 @@ public class DynamicCredentialRefresher {
 
     private static final Logger log = LoggerFactory.getLogger(DynamicCredentialRefresher.class);
 
+    /** 去抖窗口：K8s symlink 原子替换会在极短时间内触发多次事件，合并为一次 reconfigure */
+    private static final long DEBOUNCE_MS = 800;
+
     private final PoolDataSource poolDataSource;
     private final Path credDir;
     private final Path usernameFile;
     private final Path passwordFile;
     private final ReentrantLock refreshLock = new ReentrantLock();
     private volatile Instant lastRefreshTime = Instant.EPOCH;
+    private volatile Instant lastSeenMtime = Instant.EPOCH;
+    /** 上次成功应用的凭据缓存；用于变更比较，避免调用已废弃的 PoolDataSource.getPassword() */
+    private volatile DbCredentials lastApplied = new DbCredentials(null, null);
 
+    /** 轮询用虚拟线程：单线程、轻量短任务，适合阻塞型 I/O（mtime 读取） */
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(
-            Thread.ofVirtual().name("cred-poll-", 0).factory()
-    );
+            Thread.ofVirtual().name("cred-poll-", 0).factory());
 
-    @Autowired
+    /** watch 循环用平台线程：WatchService.take() 是原生阻塞，JDK21 会钉住载体（JEP444/491） */
+    private final WatchService watchService;
+    private final Thread watcher;
+
     public DynamicCredentialRefresher(
             DataSource dataSource,
-            @Value("${DB_CRED_DIR:/etc/secrets/db}") String credDirPath) {
-        if (!(dataSource instanceof PoolDataSource pds)) {
-            throw new IllegalStateException(
-                "UCP PoolDataSource required. Found: " + dataSource.getClass().getName());
-        }
-        this.poolDataSource = pds;
+            @Value("${DB_CRED_DIR:/etc/secrets/db}") String credDirPath) throws IOException {
+        // §9.2.1 修复：DataSource 可能被 LazyConnectionDataSourceProxy 包装，需 unwrap 到真实 PoolDataSource
+        this.poolDataSource = dataSource.isWrapperFor(PoolDataSource.class)
+                ? dataSource.unwrap(PoolDataSource.class)
+                : (PoolDataSource) dataSource;
         this.credDir = Path.of(credDirPath);
-        this.usernameFile = this.credDir.resolve("username");
-        this.passwordFile = this.credDir.resolve("password");
+        this.usernameFile = credDir.resolve("username");
+        this.passwordFile = credDir.resolve("password");
+        this.watchService = FileSystems.getDefault().newWatchService();
+        this.watcher = Thread.ofPlatform().name("secret-watcher").unstarted(this::watchServiceLoop);
     }
 
     @EventListener(ApplicationReadyEvent.class)
     public void start() {
-        loadAndApplyCredentials();
-
-        Thread.ofVirtual()
-                .name("secret-watcher")
-                .uncaughtExceptionHandler((t, e) -> log.error("Watcher thread died", e))
-                .start(this::watchServiceLoop);
-
+        applyIfChanged();   // 启动期凭据已由 EnvironmentPostProcessor 注入，此处仅对齐一次
+        watcher.start();
         scheduler.scheduleWithFixedDelay(this::pollForChanges, 30, 30, TimeUnit.SECONDS);
-
-        log.info("Dynamic credential refresher started. Dir={}", credDir);
+        log.info("Dynamic credential refresher started. dir={}", credDir);
     }
 
-    /**
-     * 监听目录以适配 K8s Secret symlink 原子替换机制
-     */
+    /** 平台线程：监听目录以适配 K8s Secret symlink 原子替换（..data → ..<timestamp>） */
     private void watchServiceLoop() {
-        try (WatchService ws = FileSystems.getDefault().newWatchService()) {
-            credDir.register(ws,
+        try {
+            credDir.register(watchService,
                     StandardWatchEventKinds.ENTRY_MODIFY,
                     StandardWatchEventKinds.ENTRY_CREATE);
-
             log.info("WatchService registered on {}", credDir);
             WatchKey key;
-            while ((key = ws.take()) != null) {
-                boolean relevant = false;
-                for (WatchEvent<?> event : key.pollEvents()) {
-                    Path changed = (Path) event.context();
-                    String name = changed.toString();
-                    if (name.contains("username") || name.contains("password") 
-                            || name.equals("..data")) {
-                        relevant = true;
-                        log.debug("Watch event: {} {}", event.kind(), changed);
-                    }
-                }
+            while ((key = watchService.take()) != null) {
+                boolean relevant = key.pollEvents().stream()
+                        .map(e -> ((Path) e.context()).toString())
+                        .anyMatch(n -> n.contains("username") || n.contains("password") || n.equals("..data"));
                 if (relevant) {
-                    // 等待 K8s 完成所有文件的原子写入
-                    Thread.sleep(500);
-                    loadAndApplyCredentials();
+                    scheduleRefresh();   // 去抖：合并短时多次事件
                 }
                 key.reset();
             }
         } catch (ClosedWatchServiceException e) {
             log.info("WatchService closed gracefully");
-        } catch (IOException | InterruptedException e) {
-            log.error("WatchService loop terminated, polling remains active", e);
+        } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            log.info("Watcher interrupted, polling remains active");
         }
     }
 
+    /** 轮询兜底：确保即使 WatchService 漏事件（kubelet 同步延迟）也能在 30s 内发现变化 */
     private void pollForChanges() {
         try {
-            Instant latest = Instant.ofEpochMilli(Math.max(
-                    Files.getLastModifiedTime(usernameFile).toMillis(),
-                    Files.getLastModifiedTime(passwordFile).toMillis()));
-            if (latest.isAfter(lastRefreshTime)) {
-                log.info("Polling detected credential change (mtime delta)");
-                loadAndApplyCredentials();
+            Instant latest = latestMtime();
+            if (latest.isAfter(lastSeenMtime)) {
+                lastSeenMtime = latest;
+                scheduleRefresh();
             }
         } catch (IOException e) {
             log.warn("Polling check failed: {}", e.getMessage());
         }
     }
 
+    /** 去抖：每次触发都延后 DEBOUNCE_MS 执行；applyIfChanged 自身幂等（比较凭据 + 加锁），重复调度无副作用 */
+    private void scheduleRefresh() {
+        scheduler.schedule(this::applyIfChanged, DEBOUNCE_MS, TimeUnit.MILLISECONDS);
+    }
+
     /**
-     * Static Role 场景下用户名不变，但密码会变
-     * 通过 reconfigureDataSource(Properties) 一次性下发新凭据
+     * Static Role 场景下用户名不变、密码随轮转变化。
+     * 通过 reconfigureDataSource(Properties) 平滑重配：旧连接标记过期、新连接用新凭据。
+     * 注意：reconfigureDataSource(Properties) 需 Properties 参数且抛 SQLException，无无参重载。
      */
-    private void loadAndApplyCredentials() {
+    private void applyIfChanged() {
         refreshLock.lock();
         try {
             DbCredentials creds = readCredentialsFromFiles();
@@ -368,62 +495,88 @@ public class DynamicCredentialRefresher {
                 log.warn("Read empty credentials, skipping refresh");
                 return;
             }
-
-            // Static Role 下用户名通常不变，但密码会随轮转变化
-            // 仍需比较两者，避免无意义的 reconfigure
-            if (creds.username().equals(poolDataSource.getUser())
-                    && creds.password().equals(poolDataSource.getPassword())) {
+            if (creds.equals(lastApplied)) {
                 log.debug("Credentials unchanged, skip");
                 return;
             }
 
             log.info("Refreshing UCP credentials for user: {}", creds.username());
-
-            // UCP 平滑重配：构造 Properties 传入 reconfigureDataSource(Properties)
-            // 旧连接被标记为过期，新连接使用新凭据
-            // 注意：reconfigureDataSource 需要 Properties 参数，无无参重载，且抛 SQLException
             Properties props = new Properties();
             props.setProperty("user", creds.username());
             props.setProperty("password", creds.password());
             poolDataSource.reconfigureDataSource(props);
 
             if (!verifyNewCredentials()) {
-                log.error("New credentials verification FAILED! Old connections may still be served.");
+                // §9.2.3：失败不回退——旧连接仍可服务，等待下一轮重试
+                log.error("Credential verification FAILED; old connections may still be served, will retry next cycle");
                 return;
             }
 
+            lastApplied = creds;
             lastRefreshTime = Instant.now();
-            log.info("UCP credentials refreshed and verified successfully");
-
+            lastSeenMtime = latestMtime();
+            log.info("UCP credentials refreshed & verified. borrowed={}, available={}",
+                    poolDataSource.getBorrowedConnectionsCount(),
+                    poolDataSource.getAvailableConnectionsCount());
         } catch (Exception e) {
-            log.error("Failed to refresh UCP credentials", e);
+            // §9.5：异常栈含 Properties（含密码），仅记录消息，避免密码进入日志
+            log.error("Failed to refresh UCP credentials: {}", e.toString());
         } finally {
             refreshLock.unlock();
         }
     }
 
+    /**
+     * §9.2.3 修复：reconfigureDataSource 后，池中旧连接被标记过期但不会立即销毁，
+     * 紧接着借一条可能分到旧连接（旧密码仍有效）→ 误判。
+     * 解法：连续借多条并 isValid，确认至少能以新凭据成功建连。
+     */
     private boolean verifyNewCredentials() {
-        try (Connection conn = poolDataSource.getConnection()) {
-            boolean valid = conn.isValid(3);
-            log.debug("Credential verification connection valid={}", valid);
-            return valid;
-        } catch (Exception e) {
-            log.error("Credential verification failed: {}", e.getMessage());
-            return false;
+        for (int i = 0; i < 3; i++) {
+            try (Connection c = poolDataSource.getConnection()) {
+                if (!c.isValid(3)) {
+                    return false;
+                }
+            } catch (Exception e) {
+                log.warn("Verify borrow #{} failed: {}", i, e.toString());
+                return false;
+            }
         }
+        return true;
+    }
+
+    private Instant latestMtime() throws IOException {
+        FileTime u = Files.getLastModifiedTime(usernameFile);
+        FileTime p = Files.getLastModifiedTime(passwordFile);
+        return Instant.ofEpochMilli(Math.max(u.toMillis(), p.toMillis()));
     }
 
     private DbCredentials readCredentialsFromFiles() throws IOException {
-        String user = Files.readString(usernameFile).trim();
-        String pass = Files.readString(passwordFile).trim();
-        return new DbCredentials(user, pass);
+        return new DbCredentials(
+                Files.readString(usernameFile).trim(),
+                Files.readString(passwordFile).trim());
+    }
+
+    @PreDestroy
+    public void shutdown() {
+        scheduler.shutdownNow();
+        try {
+            watchService.close();   // 触发 take() 抛 ClosedWatchServiceException，watcher 自然退出
+        } catch (IOException ignored) {
+            // 忽略关闭异常
+        }
     }
 }
 ```
 
-### 6.3 健康检查
+### 6.4 健康检查
+
+> `connection-fetch=lazy` 下注入的可能是 `LazyConnectionDataSourceProxy`；健康检查直接用 `DataSource` 即可（`isValid` 会触发真实建连），如需读 UCP 统计可 `unwrap`。
 
 ```java
+package zxf.logging.springboot.cred;
+
+import oracle.ucp.jdbc.PoolDataSource;
 import org.springframework.boot.actuate.health.Health;
 import org.springframework.boot.actuate.health.HealthIndicator;
 import org.springframework.stereotype.Component;
@@ -444,13 +597,16 @@ public class DatabaseHealthIndicator implements HealthIndicator {
     public Health health() {
         try (Connection c = dataSource.getConnection()) {
             if (c.isValid(2)) {
-                return Health.up()
-                        .withDetail("pool", dataSource.getClass().getSimpleName())
-                        .build();
+                Health.Builder up = Health.up().withDetail("pool", dataSource.getClass().getSimpleName());
+                // 可选：暴露 UCP 统计便于排障
+                if (dataSource.isWrapperFor(PoolDataSource.class)) {
+                    PoolDataSource pds = dataSource.unwrap(PoolDataSource.class);
+                    up.withDetail("borrowed", pds.getBorrowedConnectionsCount())
+                      .withDetail("available", pds.getAvailableConnectionsCount());
+                }
+                return up.build();
             }
-            return Health.down()
-                    .withDetail("error", "Connection invalid")
-                    .build();
+            return Health.down().withDetail("error", "Connection invalid").build();
         } catch (Exception e) {
             return Health.down(e).build();
         }
