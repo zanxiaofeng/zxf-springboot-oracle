@@ -278,16 +278,68 @@ management.health.db.enabled=false
 
 ## 6. Java 代码：凭据热刷
 
-### 6.1 凭据 Record
+### 6.1 凭据载体与文件源
+
+不可变凭据载体（record 天然线程安全）：
 
 ```java
+package zxf.logging.springboot.cred;
+
 /**
  * 不可变凭据载体，天然线程安全
  */
 public record DbCredentials(String username, String password) {
     public boolean isEmpty() {
-        return username == null || username.isBlank() 
+        return username == null || username.isBlank()
             || password == null || password.isBlank();
+    }
+}
+```
+
+文件源（单一职责：定位文件、判断可用性、读取凭据、报告 mtime）。既可作 Spring Bean 供运行期热刷注入，也可被 `BootstrapInitializer` 在上下文创建前直接 `new`：
+
+```java
+package zxf.logging.springboot.cred;
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Instant;
+
+@Component
+public class CredentialFileSource {
+
+    private final Path dir;
+    private final Path usernameFile;
+    private final Path passwordFile;
+
+    public CredentialFileSource(@Value("${DB_CRED_DIR:/etc/secrets/db}") String dir) {
+        this.dir = Path.of(dir);
+        this.usernameFile = this.dir.resolve("username");
+        this.passwordFile = this.dir.resolve("password");
+    }
+
+    public Path getDir() {
+        return dir;
+    }
+
+    public boolean isAvailable() {
+        return Files.isReadable(usernameFile) && Files.isReadable(passwordFile);
+    }
+
+    public DbCredentials read() throws IOException {
+        return new DbCredentials(
+                Files.readString(usernameFile).trim(),
+                Files.readString(passwordFile).trim());
+    }
+
+    public Instant latestMtime() throws IOException {
+        long u = Files.getLastModifiedTime(usernameFile).toMillis();
+        long p = Files.getLastModifiedTime(passwordFile).toMillis();
+        return Instant.ofEpochMilli(Math.max(u, p));
     }
 }
 ```
@@ -308,10 +360,7 @@ import org.springframework.boot.context.event.ApplicationEnvironmentPreparedEven
 import org.springframework.context.ApplicationListener;
 import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.core.env.MapPropertySource;
-import org.springframework.util.StringUtils;
 
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.Map;
 
 /**
@@ -333,21 +382,20 @@ public class CredentialBootstrapInitializer implements BootstrapRegistryInitiali
         @Override
         public void onApplicationEvent(ApplicationEnvironmentPreparedEvent event) {
             ConfigurableEnvironment env = event.getEnvironment();
-            String dir = env.getProperty("DB_CRED_DIR", "/etc/secrets/db");
-            Path userFile = Path.of(dir, "username");
-            Path passFile = Path.of(dir, "password");
-            if (!Files.isReadable(userFile) || !Files.isReadable(passFile)) {
+            // 上下文创建前无 Bean 可注入，直接 new 文件源（与运行期共享同一读取逻辑）
+            CredentialFileSource source = new CredentialFileSource(
+                    env.getProperty("DB_CRED_DIR", "/etc/secrets/db"));
+            if (!source.isAvailable()) {
                 return; // dev/无挂载：回退到 application.yml
             }
             try {
-                String user = Files.readString(userFile).trim();
-                String pass = Files.readString(passFile).trim();
-                if (StringUtils.hasText(user) && StringUtils.hasText(pass)) {
+                DbCredentials creds = source.read();
+                if (!creds.isEmpty()) {
                     env.getPropertySources().addFirst(new MapPropertySource(
                             "vaultStaticCreds",
                             Map.of(
-                                    "spring.datasource.username", user,
-                                    "spring.datasource.password", pass)));
+                                    "spring.datasource.username", creds.username(),
+                                    "spring.datasource.password", creds.password())));
                 }
             } catch (Exception ignored) {
                 // 读取失败不阻断启动：交由后续 DataSource 建连时报错暴露
@@ -374,9 +422,7 @@ import oracle.ucp.jdbc.PoolDataSource;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Tags;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
@@ -385,7 +431,6 @@ import jakarta.annotation.PreDestroy;
 import javax.sql.DataSource;
 import java.io.IOException;
 import java.nio.file.*;
-import java.nio.file.attribute.FileTime;
 import java.sql.Connection;
 import java.time.Instant;
 import java.util.Properties;
@@ -395,18 +440,17 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 
+@Slf4j
 @Service
 public class DynamicCredentialRefresher {
 
-    private static final Logger log = LoggerFactory.getLogger(DynamicCredentialRefresher.class);
-
     /** 去抖窗口：K8s symlink 原子替换会在极短时间内触发多次事件，合并为一次 reconfigure */
     private static final long DEBOUNCE_MS = 800;
+    /** 验证借连次数：reconfigure 后旧连接未立即销毁，需多次确认拿到新凭据连接 */
+    private static final int VERIFY_BORROWS = 3;
 
     private final PoolDataSource poolDataSource;
-    private final Path credDir;
-    private final Path usernameFile;
-    private final Path passwordFile;
+    private final CredentialFileSource credSource;
     private final ReentrantLock refreshLock = new ReentrantLock();
     private volatile Instant lastRefreshTime = Instant.EPOCH;
     private volatile Instant lastSeenMtime = Instant.EPOCH;
@@ -430,19 +474,21 @@ public class DynamicCredentialRefresher {
 
     public DynamicCredentialRefresher(
             DataSource dataSource,
-            MeterRegistry meterRegistry,
-            @Value("${DB_CRED_DIR:/etc/secrets/db}") String credDirPath) throws IOException {
-        // DataSource 可能被 LazyConnectionDataSourceProxy 包装，需 unwrap 到真实 PoolDataSource
-        this.poolDataSource = dataSource.isWrapperFor(PoolDataSource.class)
-                ? dataSource.unwrap(PoolDataSource.class)
-                : (PoolDataSource) dataSource;
-        this.credDir = Path.of(credDirPath);
-        this.usernameFile = credDir.resolve("username");
-        this.passwordFile = credDir.resolve("password");
+            CredentialFileSource credSource,
+            MeterRegistry meterRegistry) throws IOException {
+        this.poolDataSource = unwrapPool(dataSource);
+        this.credSource = credSource;
+        this.meterRegistry = meterRegistry;
         this.watchService = FileSystems.getDefault().newWatchService();
         this.watcher = Thread.ofPlatform().name("secret-watcher").unstarted(this::watchServiceLoop);
-        this.meterRegistry = meterRegistry;
         registerMetrics();
+    }
+
+    /** DataSource 可能被 LazyConnectionDataSourceProxy 包装，需 unwrap 到真实 PoolDataSource */
+    private static PoolDataSource unwrapPool(DataSource dataSource) {
+        return dataSource.isWrapperFor(PoolDataSource.class)
+                ? dataSource.unwrap(PoolDataSource.class)
+                : (PoolDataSource) dataSource;
     }
 
     private void registerMetrics() {
@@ -456,19 +502,19 @@ public class DynamicCredentialRefresher {
 
     @EventListener(ApplicationReadyEvent.class)
     public void start() {
-        applyIfChanged();   // 启动期凭据已由 EnvironmentPostProcessor 注入，此处仅对齐一次
+        applyIfChanged();   // 启动期凭据已由 BootstrapInitializer 注入，此处仅对齐一次
         watcher.start();
         scheduler.scheduleWithFixedDelay(this::pollForChanges, 30, 30, TimeUnit.SECONDS);
-        log.info("Dynamic credential refresher started. dir={}", credDir);
+        log.info("Dynamic credential refresher started. dir={}", credSource.getDir());
     }
 
     /** 平台线程：监听目录以适配 K8s Secret symlink 原子替换（..data → ..<timestamp>） */
     private void watchServiceLoop() {
         try {
-            credDir.register(watchService,
+            credSource.getDir().register(watchService,
                     StandardWatchEventKinds.ENTRY_MODIFY,
                     StandardWatchEventKinds.ENTRY_CREATE);
-            log.info("WatchService registered on {}", credDir);
+            log.info("WatchService registered on {}", credSource.getDir());
             WatchKey key;
             while ((key = watchService.take()) != null) {
                 boolean relevant = key.pollEvents().stream()
@@ -490,7 +536,7 @@ public class DynamicCredentialRefresher {
     /** 轮询兜底：确保即使 WatchService 漏事件（kubelet 同步延迟）也能在 30s 内发现变化 */
     private void pollForChanges() {
         try {
-            Instant latest = latestMtime();
+            Instant latest = credSource.latestMtime();
             if (latest.isAfter(lastSeenMtime)) {
                 lastSeenMtime = latest;
                 scheduleRefresh();
@@ -513,7 +559,7 @@ public class DynamicCredentialRefresher {
     private void applyIfChanged() {
         refreshLock.lock();
         try {
-            DbCredentials creds = readCredentialsFromFiles();
+            DbCredentials creds = credSource.read();
             if (creds.isEmpty()) {
                 log.warn("Read empty credentials, skipping refresh");
                 return;
@@ -524,10 +570,7 @@ public class DynamicCredentialRefresher {
             }
 
             log.info("Refreshing UCP credentials for user: {}", creds.username());
-            Properties props = new Properties();
-            props.setProperty("user", creds.username());
-            props.setProperty("password", creds.password());
-            poolDataSource.reconfigureDataSource(props);
+            poolDataSource.reconfigureDataSource(toProps(creds));
 
             if (!verifyNewCredentials()) {
                 // 失败不回退——旧连接仍可服务，等待下一轮重试
@@ -538,7 +581,7 @@ public class DynamicCredentialRefresher {
 
             lastApplied = creds;
             lastRefreshTime = Instant.now();
-            lastSeenMtime = latestMtime();
+            lastSeenMtime = credSource.latestMtime();
             lastRefreshEpoch.set(lastRefreshTime.getEpochSecond());
             refreshSuccess.increment();
             log.info("UCP credentials refreshed & verified. borrowed={}, available={}",
@@ -553,13 +596,20 @@ public class DynamicCredentialRefresher {
         }
     }
 
+    private static Properties toProps(DbCredentials creds) {
+        Properties props = new Properties();
+        props.setProperty("user", creds.username());
+        props.setProperty("password", creds.password());
+        return props;
+    }
+
     /**
      * reconfigureDataSource 后，池中旧连接被标记过期但不会立即销毁，
      * 紧接着借一条可能分到旧连接（旧密码仍有效）→ 误判。
      * 解法：连续借多条并 isValid，确认至少能以新凭据成功建连。
      */
     private boolean verifyNewCredentials() {
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < VERIFY_BORROWS; i++) {
             try (Connection c = poolDataSource.getConnection()) {
                 if (!c.isValid(3)) {
                     return false;
@@ -570,18 +620,6 @@ public class DynamicCredentialRefresher {
             }
         }
         return true;
-    }
-
-    private Instant latestMtime() throws IOException {
-        FileTime u = Files.getLastModifiedTime(usernameFile);
-        FileTime p = Files.getLastModifiedTime(passwordFile);
-        return Instant.ofEpochMilli(Math.max(u.toMillis(), p.toMillis()));
-    }
-
-    private DbCredentials readCredentialsFromFiles() throws IOException {
-        return new DbCredentials(
-                Files.readString(usernameFile).trim(),
-                Files.readString(passwordFile).trim());
     }
 
     @PreDestroy
