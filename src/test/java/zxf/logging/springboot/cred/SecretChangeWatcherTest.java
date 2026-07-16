@@ -1,6 +1,7 @@
 package zxf.logging.springboot.cred;
 
 import org.awaitility.Awaitility;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.scheduling.TaskScheduler;
@@ -18,6 +19,8 @@ class SecretChangeWatcherTest {
 
     @TempDir
     Path tempDir;
+
+    private ThreadPoolTaskScheduler tps;
 
     @Test
     void isRelevant_matches_credential_files() {
@@ -65,9 +68,16 @@ class SecretChangeWatcherTest {
     }
 
     private TaskScheduler newScheduler() {
-        ThreadPoolTaskScheduler tps = new ThreadPoolTaskScheduler();
+        tps = new ThreadPoolTaskScheduler();
         tps.setPoolSize(1);
         tps.afterPropertiesSet();
         return tps;
+    }
+
+    @AfterEach
+    void tearDown() {
+        if (tps != null) {
+            tps.shutdown();
+        }
     }
 }

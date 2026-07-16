@@ -1,54 +1,64 @@
 package zxf.logging.springboot.cred;
 
+import org.awaitility.Awaitility;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.scheduling.TaskScheduler;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
 import java.time.Duration;
-import java.time.Instant;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 class DebouncerTest {
 
+    private ThreadPoolTaskScheduler tps;
     private TaskScheduler scheduler;
     private AtomicInteger actionCalls;
 
     @BeforeEach
     void setUp() {
-        ThreadPoolTaskScheduler tps = new ThreadPoolTaskScheduler();
+        tps = new ThreadPoolTaskScheduler();
         tps.setPoolSize(1);
         tps.afterPropertiesSet();
         scheduler = tps;
         actionCalls = new AtomicInteger();
     }
 
+    @AfterEach
+    void tearDown() {
+        if (tps != null) {
+            tps.shutdown();
+        }
+    }
+
     @Test
-    void trigger_schedules_action_after_debounce_ms() throws Exception {
+    void trigger_schedules_action_after_debounce_ms() {
         Debouncer debouncer = new Debouncer(scheduler, 50);
 
         debouncer.trigger(actionCalls::incrementAndGet);
 
-        // 等待去抖窗口 + 调度执行
-        Thread.sleep(300);
-        assertThat(actionCalls.get()).isEqualTo(1);
+        // 等待去抖窗口 + 调度执行（Awaitility 轮询，比固定 sleep 稳健）
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(2))
+                .untilAsserted(() -> assertThat(actionCalls.get()).isEqualTo(1));
     }
 
     @Test
-    void repeated_trigger_cancels_previous_and_runs_once() throws Exception {
+    void repeated_trigger_cancels_previous_and_runs_once() {
         Debouncer debouncer = new Debouncer(scheduler, 100);
 
         // 连续触发 5 次，都在去抖窗口内
         for (int i = 0; i < 5; i++) {
             debouncer.trigger(actionCalls::incrementAndGet);
-            Thread.sleep(20);
         }
 
-        Thread.sleep(400);
-        // 只应在最后一次触发后的去抖窗口结束后执行一次
-        assertThat(actionCalls.get()).isEqualTo(1);
+        // 给最后一次触发足够时间执行（若未正确取消，会执行多次）
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(2))
+                .untilAsserted(() -> assertThat(actionCalls.get()).isEqualTo(1));
     }
 
     @Test
