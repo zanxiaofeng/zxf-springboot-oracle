@@ -415,161 +415,83 @@ public class CredentialBootstrapInitializer implements BootstrapRegistryInitiali
 zxf.logging.springboot.cred.CredentialBootstrapInitializer
 ```
 
-### 6.3 运行期热刷（DynamicCredentialRefresher）
+### 6.3 运行期热刷
 
-> 设计要点：① `unwrap` 取真实 `PoolDataSource`（兼容 `connection-fetch=lazy` 包装）；② 强化验证（reconfigure 后旧连接未立即销毁，需多次借连确认新凭据可用）；③ watch 循环用平台线程（`WatchService.take()` 原生阻塞，JDK21 钉住载体，JEP 491/JDK24 才修复）；④ 去抖 + `@PreDestroy` 优雅关闭；⑤ 异常脱敏（异常栈含 `Properties`/密码，仅记录 `toString`）。
+按单一职责拆为三个协作类，`DynamicCredentialRefresher` 退化为薄编排器：
+
+| 类 | 职责 |
+|---|---|
+| `UcpCredentialApplier` | **如何切换**：`unwrap` 取真实 `PoolDataSource` → `reconfigureDataSource` + 多次借连验证 |
+| `SecretChangeWatcher` | **何时通知**：`WatchService`（平台线程）+ mtime 轮询（虚拟线程）双机制 + 去抖 |
+| `DynamicCredentialRefresher` | **编排**：注册回调、读文件、委派应用、启动即对齐一次 |
+
+> 设计要点：`unwrap` 兼容 `connection-fetch=lazy` 包装；reconfigure 后旧连接未立即销毁需多次借连验证；watch 循环用平台线程（`WatchService.take()` 原生阻塞，JDK21 钉住载体，JEP 491/JDK24 才修复）；`@PreDestroy` 优雅关闭；异常脱敏（仅记 `toString`）。监听器用单线程调度器，回调天然串行化，无需显式加锁。
+
+#### 6.3.1 凭据应用器（UcpCredentialApplier）
 
 ```java
 package zxf.logging.springboot.cred;
 
-import oracle.ucp.jdbc.PoolDataSource;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.boot.context.event.ApplicationReadyEvent;
-import org.springframework.context.event.EventListener;
-import org.springframework.stereotype.Service;
+import oracle.ucp.jdbc.PoolDataSource;
+import org.springframework.stereotype.Component;
 
-import jakarta.annotation.PreDestroy;
 import javax.sql.DataSource;
-import java.io.IOException;
-import java.nio.file.*;
 import java.sql.Connection;
-import java.time.Instant;
 import java.util.Properties;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.locks.ReentrantLock;
 
+/**
+ * 凭据应用器：把新凭据安全切换到 UCP 连接池（reconfigureDataSource + 多次借连验证）。
+ * 职责单一——只回答「如何切换」，不关心「何时切换」。
+ */
 @Slf4j
-@Service
-public class DynamicCredentialRefresher {
+@Component
+public class UcpCredentialApplier {
 
-    /** 去抖窗口：K8s symlink 原子替换会在极短时间内触发多次事件，合并为一次 reconfigure */
-    private static final long DEBOUNCE_MS = 800;
     /** 验证借连次数：reconfigure 后旧连接未立即销毁，需多次确认拿到新凭据连接 */
     private static final int VERIFY_BORROWS = 3;
 
     private final PoolDataSource poolDataSource;
-    private final CredentialFileSource credSource;
-    private final ReentrantLock refreshLock = new ReentrantLock();
-    private volatile Instant lastRefreshTime = Instant.EPOCH;
-    private volatile Instant lastSeenMtime = Instant.EPOCH;
     /** 上次成功应用的凭据缓存；用于变更比较，避免调用已废弃的 PoolDataSource.getPassword() */
     private volatile DbCredentials lastApplied = new DbCredentials(null, null);
 
-    /** 轮询用虚拟线程：单线程、轻量短任务，适合阻塞型 I/O（mtime 读取） */
-    private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(
-            Thread.ofVirtual().name("cred-poll-", 0).factory());
-
-    /** watch 循环用平台线程：WatchService.take() 是原生阻塞，JDK21 会钉住载体（JEP444/491） */
-    private final WatchService watchService;
-    private final Thread watcher;
-
-    public DynamicCredentialRefresher(
-            DataSource dataSource,
-            CredentialFileSource credSource) throws IOException {
-        this.poolDataSource = unwrapPool(dataSource);
-        this.credSource = credSource;
-        this.watchService = FileSystems.getDefault().newWatchService();
-        this.watcher = Thread.ofPlatform().name("secret-watcher").unstarted(this::watchServiceLoop);
-    }
-
-    /** DataSource 可能被 LazyConnectionDataSourceProxy 包装，需 unwrap 到真实 PoolDataSource */
-    private static PoolDataSource unwrapPool(DataSource dataSource) {
-        return dataSource.isWrapperFor(PoolDataSource.class)
+    public UcpCredentialApplier(DataSource dataSource) {
+        // DataSource 可能被 LazyConnectionDataSourceProxy 包装，需 unwrap 到真实 PoolDataSource
+        this.poolDataSource = dataSource.isWrapperFor(PoolDataSource.class)
                 ? dataSource.unwrap(PoolDataSource.class)
                 : (PoolDataSource) dataSource;
     }
 
-    @EventListener(ApplicationReadyEvent.class)
-    public void start() {
-        applyIfChanged();   // 启动期凭据已由 BootstrapInitializer 注入，此处仅对齐一次
-        watcher.start();
-        scheduler.scheduleWithFixedDelay(this::pollForChanges, 30, 30, TimeUnit.SECONDS);
-        log.info("Dynamic credential refresher started. dir={}", credSource.getDir());
-    }
-
-    /** 平台线程：监听目录以适配 K8s Secret symlink 原子替换（..data → ..<timestamp>） */
-    private void watchServiceLoop() {
-        try {
-            credSource.getDir().register(watchService,
-                    StandardWatchEventKinds.ENTRY_MODIFY,
-                    StandardWatchEventKinds.ENTRY_CREATE);
-            log.info("WatchService registered on {}", credSource.getDir());
-            WatchKey key;
-            while ((key = watchService.take()) != null) {
-                boolean relevant = key.pollEvents().stream()
-                        .map(e -> ((Path) e.context()).toString())
-                        .anyMatch(n -> n.contains("username") || n.contains("password") || n.equals("..data"));
-                if (relevant) {
-                    scheduleRefresh();   // 去抖：合并短时多次事件
-                }
-                key.reset();
-            }
-        } catch (ClosedWatchServiceException e) {
-            log.info("WatchService closed gracefully");
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            log.info("Watcher interrupted, polling remains active");
-        }
-    }
-
-    /** 轮询兜底：确保即使 WatchService 漏事件（kubelet 同步延迟）也能在 30s 内发现变化 */
-    private void pollForChanges() {
-        try {
-            Instant latest = credSource.latestMtime();
-            if (latest.isAfter(lastSeenMtime)) {
-                lastSeenMtime = latest;
-                scheduleRefresh();
-            }
-        } catch (IOException e) {
-            log.warn("Polling check failed: {}", e.getMessage());
-        }
-    }
-
-    /** 去抖：每次触发都延后 DEBOUNCE_MS 执行；applyIfChanged 自身幂等（比较凭据 + 加锁），重复调度无副作用 */
-    private void scheduleRefresh() {
-        scheduler.schedule(this::applyIfChanged, DEBOUNCE_MS, TimeUnit.MILLISECONDS);
-    }
-
     /**
-     * Static Role 场景下用户名不变、密码随轮转变化。
-     * 通过 reconfigureDataSource(Properties) 平滑重配：旧连接标记过期、新连接用新凭据。
-     * 注意：reconfigureDataSource(Properties) 需 Properties 参数且抛 SQLException，无无参重载。
+     * 应用凭据：相同则跳过；否则 reconfigure + 验证。
+     * @return true=已切换或无变化；false=验证失败（旧连接仍可服务，等下轮重试）
      */
-    private void applyIfChanged() {
-        refreshLock.lock();
+    public boolean apply(DbCredentials creds) {
+        if (creds.isEmpty()) {
+            log.warn("Read empty credentials, skipping apply");
+            return false;
+        }
+        if (creds.equals(lastApplied)) {
+            log.debug("Credentials unchanged, skip");
+            return true;
+        }
         try {
-            DbCredentials creds = credSource.read();
-            if (creds.isEmpty()) {
-                log.warn("Read empty credentials, skipping refresh");
-                return;
-            }
-            if (creds.equals(lastApplied)) {
-                log.debug("Credentials unchanged, skip");
-                return;
-            }
-
             log.info("Refreshing UCP credentials for user: {}", creds.username());
             poolDataSource.reconfigureDataSource(toProps(creds));
-
             if (!verifyNewCredentials()) {
                 // 失败不回退——旧连接仍可服务，等待下一轮重试
                 log.error("Credential verification FAILED; old connections may still be served, will retry next cycle");
-                return;
+                return false;
             }
-
             lastApplied = creds;
-            lastRefreshTime = Instant.now();
-            lastSeenMtime = credSource.latestMtime();
             log.info("UCP credentials refreshed & verified. borrowed={}, available={}",
                     poolDataSource.getBorrowedConnectionsCount(),
                     poolDataSource.getAvailableConnectionsCount());
+            return true;
         } catch (Exception e) {
             // 异常栈含 Properties（含密码），仅记录消息，避免密码进入日志
             log.error("Failed to refresh UCP credentials: {}", e.toString());
-        } finally {
-            refreshLock.unlock();
+            return false;
         }
     }
 
@@ -598,6 +520,121 @@ public class DynamicCredentialRefresher {
         }
         return true;
     }
+}
+```
+
+#### 6.3.2 变化监听器（SecretChangeWatcher）
+
+```java
+package zxf.logging.springboot.cred;
+
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Component;
+
+import jakarta.annotation.PreDestroy;
+import java.io.IOException;
+import java.nio.file.*;
+import java.time.Instant;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * 变化监听器：WatchService（平台线程）+ mtime 轮询（虚拟线程）双机制，去抖后回调。
+ * 职责单一——只回答「何时通知变化」，不关心「如何应用」。
+ */
+@Slf4j
+@Component
+public class SecretChangeWatcher {
+
+    /** 去抖窗口：K8s symlink 原子替换会在极短时间内触发多次事件，合并为一次回调 */
+    private static final long DEBOUNCE_MS = 800;
+    /** 轮询周期：即使 WatchService 漏事件（kubelet 同步延迟）也能在此时长内发现 */
+    private static final long POLL_INTERVAL_SECONDS = 30;
+
+    private final CredentialFileSource credSource;
+    /** 单线程调度器：天然序列化回调执行，无需额外加锁 */
+    private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(
+            Thread.ofVirtual().name("cred-poll-", 0).factory());
+    /** watch 循环用平台线程：WatchService.take() 原生阻塞，JDK21 钉住载体（JEP444/491） */
+    private final WatchService watchService;
+    private final Thread watcher;
+
+    private volatile Instant lastSeenMtime = Instant.EPOCH;
+    private volatile Runnable onChange = () -> {};
+
+    public SecretChangeWatcher(CredentialFileSource credSource) throws IOException {
+        this.credSource = credSource;
+        this.watchService = FileSystems.getDefault().newWatchService();
+        this.watcher = Thread.ofPlatform().name("secret-watcher").unstarted(this::watchServiceLoop);
+    }
+
+    /** 注册变化回调（幂等：以最后一次为准） */
+    public void onChange(Runnable callback) {
+        this.onChange = callback;
+    }
+
+    /** 由编排器调用，确保回调注册后再启动，避免漏掉首次变化 */
+    public void start() {
+        advanceLastSeenMtime();   // 以当前 mtime 为基线，避免启动即误触发
+        watcher.start();
+        scheduler.scheduleWithFixedDelay(this::pollForChanges,
+                POLL_INTERVAL_SECONDS, POLL_INTERVAL_SECONDS, TimeUnit.SECONDS);
+        log.info("Secret change watcher started. dir={}, poll={}s, debounce={}ms",
+                credSource.getDir(), POLL_INTERVAL_SECONDS, DEBOUNCE_MS);
+    }
+
+    /** 平台线程：监听目录以适配 K8s Secret symlink 原子替换（..data → ..<timestamp>） */
+    private void watchServiceLoop() {
+        try {
+            credSource.getDir().register(watchService,
+                    StandardWatchEventKinds.ENTRY_MODIFY,
+                    StandardWatchEventKinds.ENTRY_CREATE);
+            log.info("WatchService registered on {}", credSource.getDir());
+            WatchKey key;
+            while ((key = watchService.take()) != null) {
+                boolean relevant = key.pollEvents().stream()
+                        .map(e -> ((Path) e.context()).toString())
+                        .anyMatch(n -> n.contains("username") || n.contains("password") || n.equals("..data"));
+                if (relevant) {
+                    scheduleNotify();   // 去抖：合并短时多次事件
+                }
+                key.reset();
+            }
+        } catch (ClosedWatchServiceException e) {
+            log.info("WatchService closed gracefully");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.info("Watcher interrupted, polling remains active");
+        }
+    }
+
+    /** 轮询兜底 */
+    private void pollForChanges() {
+        try {
+            Instant latest = credSource.latestMtime();
+            if (latest.isAfter(lastSeenMtime)) {
+                lastSeenMtime = latest;
+                scheduleNotify();
+            }
+        } catch (IOException e) {
+            log.warn("Polling check failed: {}", e.getMessage());
+        }
+    }
+
+    /** 去抖：延后 DEBOUNCE_MS 执行回调；回调须幂等，重复调度无副作用 */
+    private void scheduleNotify() {
+        advanceLastSeenMtime();   // 防止下一次轮询因 mtime 滞后而重复触发
+        scheduler.schedule(onChange, DEBOUNCE_MS, TimeUnit.MILLISECONDS);
+    }
+
+    private void advanceLastSeenMtime() {
+        try {
+            lastSeenMtime = credSource.latestMtime();
+        } catch (IOException ignored) {
+            // 读取失败保留旧值
+        }
+    }
 
     @PreDestroy
     public void shutdown() {
@@ -606,6 +643,48 @@ public class DynamicCredentialRefresher {
             watchService.close();   // 触发 take() 抛 ClosedWatchServiceException，watcher 自然退出
         } catch (IOException ignored) {
             // 忽略关闭异常
+        }
+    }
+}
+```
+
+#### 6.3.3 编排器（DynamicCredentialRefresher）
+
+```java
+package zxf.logging.springboot.cred;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
+import org.springframework.stereotype.Service;
+
+/**
+ * 编排器：把「变化检测」与「凭据应用」解耦，自身只剩读取 + 委派。
+ * 启动顺序：注册回调 → 启动监听器 → 对齐一次。
+ */
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class DynamicCredentialRefresher {
+
+    private final CredentialFileSource credSource;
+    private final SecretChangeWatcher watcher;
+    private final UcpCredentialApplier applier;
+
+    @EventListener(ApplicationReadyEvent.class)
+    public void start() {
+        watcher.onChange(this::refresh);   // 先注册回调，再启动，确保不漏首次变化
+        watcher.start();
+        refresh();                         // 启动即对齐一次（凭据已由 BootstrapInitializer 注入）
+        log.info("Dynamic credential refresher started");
+    }
+
+    private void refresh() {
+        try {
+            applier.apply(credSource.read());
+        } catch (Exception e) {
+            log.error("Failed to read credentials: {}", e.toString());
         }
     }
 }
