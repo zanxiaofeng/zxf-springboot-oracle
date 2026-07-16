@@ -361,7 +361,6 @@ package zxf.logging.springboot.cred;
 import org.springframework.boot.BootstrapRegistry;
 import org.springframework.boot.BootstrapRegistryInitializer;
 import org.springframework.boot.context.event.ApplicationEnvironmentPreparedEvent;
-import org.springframework.context.ApplicationListener;
 import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.core.env.MapPropertySource;
 
@@ -377,14 +376,7 @@ public class CredentialBootstrapInitializer implements BootstrapRegistryInitiali
 
     @Override
     public void initialize(BootstrapRegistry registry) {
-        registry.addApplicationListener(new CredentialEnvironmentInjector());
-    }
-
-    static class CredentialEnvironmentInjector
-            implements ApplicationListener<ApplicationEnvironmentPreparedEvent> {
-
-        @Override
-        public void onApplicationEvent(ApplicationEnvironmentPreparedEvent event) {
+        registry.addApplicationListener((ApplicationEnvironmentPreparedEvent event) -> {
             ConfigurableEnvironment env = event.getEnvironment();
             // 上下文创建前无 Bean 可注入，直接 new 文件源（与运行期共享同一读取逻辑）
             CredentialFileSource source = new CredentialFileSource(
@@ -404,7 +396,7 @@ public class CredentialBootstrapInitializer implements BootstrapRegistryInitiali
             } catch (Exception ignored) {
                 // 读取失败不阻断启动：交由后续 DataSource 建连时报错暴露
             }
-        }
+        });
     }
 }
 ```
