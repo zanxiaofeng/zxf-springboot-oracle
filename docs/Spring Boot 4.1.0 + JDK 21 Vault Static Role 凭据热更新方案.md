@@ -145,9 +145,13 @@ spec:
         app: springboot-app
     spec:
       serviceAccountName: eso-sa
-      # 以 fsGroup 让挂载的 Secret 文件对非 root 容器可读
+      # runAsUser/runAsGroup/fsGroup 三者一致，确保非 root 容器能读 secret 卷：
+      #  - fsGroup=10001 → kubelet 把挂载文件 chgrp 为 10001，并以 0440 让组可读
+      #  - runAsUser=10001 → 容器以非 root 运行（否则 runAsNonRoot 会拒绝启动）
       securityContext:
         runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
         fsGroup: 10001
       initContainers:
         - name: wait-for-secrets
@@ -175,8 +179,9 @@ spec:
         - name: secrets
           secret:
             secretName: oracle-credentials
-            # 收紧挂载文件权限（默认 0644 → 0400，仅属主可读）
-            defaultMode: 0400
+            # 0440 = 属主可读 + 组(fsGroup)可读 + others 无权限
+            # 显式组读，避免依赖 kubelet 把 0400 镜像成 0440 的隐式行为
+            defaultMode: 0440
 ```
 
 ## 5. Spring Boot 配置
