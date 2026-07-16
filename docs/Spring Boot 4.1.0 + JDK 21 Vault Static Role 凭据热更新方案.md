@@ -228,6 +228,12 @@ spec:
         <groupId>com.oracle.database.ha</groupId>
         <artifactId>ons</artifactId>
     </dependency>
+    <!-- Lombok：@Slf4j / @Getter / @RequiredArgsConstructor（§6 代码依赖），编译期 provided -->
+    <dependency>
+        <groupId>org.projectlombok</groupId>
+        <artifactId>lombok</artifactId>
+        <scope>provided</scope>
+    </dependency>
 </dependencies>
 
 <dependencyManagement>
@@ -301,6 +307,7 @@ public record DbCredentials(String username, String password) {
 ```java
 package zxf.logging.springboot.cred;
 
+import lombok.Getter;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -312,6 +319,7 @@ import java.time.Instant;
 @Component
 public class CredentialFileSource {
 
+    @Getter
     private final Path dir;
     private final Path usernameFile;
     private final Path passwordFile;
@@ -320,10 +328,6 @@ public class CredentialFileSource {
         this.dir = Path.of(dir);
         this.usernameFile = this.dir.resolve("username");
         this.passwordFile = this.dir.resolve("password");
-    }
-
-    public Path getDir() {
-        return dir;
     }
 
     public boolean isAvailable() {
@@ -615,6 +619,7 @@ public class DynamicCredentialRefresher {
 package zxf.logging.springboot.cred;
 
 import oracle.ucp.jdbc.PoolDataSource;
+import lombok.RequiredArgsConstructor;
 import org.springframework.boot.actuate.health.Health;
 import org.springframework.boot.actuate.health.HealthIndicator;
 import org.springframework.stereotype.Component;
@@ -623,13 +628,10 @@ import javax.sql.DataSource;
 import java.sql.Connection;
 
 @Component("dynamicDbHealth")
+@RequiredArgsConstructor
 public class DatabaseHealthIndicator implements HealthIndicator {
 
     private final DataSource dataSource;
-
-    public DatabaseHealthIndicator(DataSource ds) {
-        this.dataSource = ds;
-    }
 
     @Override
     public Health health() {
