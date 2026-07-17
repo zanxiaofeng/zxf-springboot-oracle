@@ -1,89 +1,92 @@
 package zxf.logging.springboot.cred;
 
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import oracle.ucp.jdbc.PoolDataSource;
 import org.springframework.stereotype.Component;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
+import java.sql.DriverManager;
 import java.sql.SQLException;
 
 /**
- * 凭据应用器：把新凭据安全切换到 UCP 连接池（reconfigureDataSource + 多次借连验证）。
+ * 凭据应用器：先用旁路连接验证新凭据，再切换 UCP 连接池配置。
  * 职责单一——只回答「如何切换」，不关心「何时切换」。
  */
 @Slf4j
 @Component
+@RequiredArgsConstructor
 public class UcpCredentialApplier {
 
-    /** 验证借连次数：reconfigure 后旧连接未立即销毁，需多次确认拿到新凭据连接 */
-    private static final int VERIFY_BORROWS = 3;
+    /** 借连验证的超时秒数 */
+    private static final int VALIDATION_TIMEOUT_SECONDS = 3;
 
-    private final PoolDataSource poolDataSource;
+    private final DataSource dataSource;
     /** 上次成功应用的凭据缓存；用于变更比较，避免调用已废弃的 PoolDataSource.getPassword() */
-    private volatile DbCredentials lastApplied = new DbCredentials(null, null);
-
-    public UcpCredentialApplier(DataSource dataSource) {
-        // DataSource 可能被 LazyConnectionDataSourceProxy 包装，需 unwrap 到真实 PoolDataSource
-        try {
-            this.poolDataSource = dataSource.isWrapperFor(PoolDataSource.class)
-                    ? dataSource.unwrap(PoolDataSource.class)
-                    : (PoolDataSource) dataSource;
-        } catch (SQLException e) {
-            throw new IllegalStateException("Failed to unwrap UCP PoolDataSource", e);
-        }
-    }
+    private volatile DbCredentials lastApplied = DbCredentials.EMPTY;
 
     /**
-     * 应用凭据：相同则跳过；否则 reconfigure + 验证。
-     *
-     * @return true=已切换或无变化；false=验证失败（旧连接仍可服务，等下轮重试）
+     * 应用凭据：相同则跳过；不同则先旁路验证，再 reconfigure。
+     * @return true=已切换或无变化；false=验证失败（池未被改动，旧凭据继续服务，等下轮事件）
      */
-    public boolean apply(DbCredentials creds) {
-        if (creds.isEmpty()) {
+    public boolean apply(DbCredentials credentials) {
+        if (credentials.isEmpty()) {
             log.warn("Read empty credentials, skipping apply");
             return false;
         }
-        if (creds.equals(lastApplied)) {
+        if (credentials.equals(lastApplied)) {
             log.debug("Credentials unchanged, skip");
             return true;
         }
+        return doApply(credentials);
+    }
+
+    /** 验证 → 切换 → 记录；任何异常仅记消息（异常信息可能携带含密码的 Properties） */
+    private boolean doApply(DbCredentials credentials) {
         try {
-            log.info("Refreshing UCP credentials for user: {}", creds.username());
-            poolDataSource.reconfigureDataSource(creds.toProps());
-            if (!verifyNewCredentials()) {
-                // 失败不回退——旧连接仍可服务，等待下一轮重试
-                log.error("Credential verification FAILED; old connections may still be served, will retry next cycle");
+            // unwrap 是纯函数且代价可忽略，按次解出，不持有派生状态字段
+            PoolDataSource pool = unwrap(dataSource);
+            if (!verifyNewCredentials(pool.getURL(), credentials)) {
+                // 验证失败不动池：旧连接仍可服务，等待下一轮事件
+                log.error("New credentials failed out-of-band check; pool left untouched, will retry next cycle");
                 return false;
             }
-            lastApplied = creds;
-            log.info("UCP credentials refreshed & verified. borrowed={}, available={}",
-                    poolDataSource.getBorrowedConnectionsCount(),
-                    poolDataSource.getAvailableConnectionsCount());
+            log.info("Refreshing UCP credentials for user: {}", credentials.username());
+            pool.reconfigureDataSource(credentials.toProperties());
+            lastApplied = credentials;
+            log.info("UCP credentials refreshed. borrowed={}, available={}",
+                    pool.getBorrowedConnectionsCount(),
+                    pool.getAvailableConnectionsCount());
             return true;
-        } catch (Exception e) {
-            // 异常栈含 Properties（含密码），仅记录消息，避免密码进入日志
-            log.error("Failed to refresh UCP credentials: {}", e.toString());
+        } catch (Exception exception) {
+            log.error("Failed to refresh UCP credentials: {}", exception.toString());
             return false;
         }
     }
 
     /**
-     * reconfigureDataSource 后，池中旧连接被标记过期但不会立即销毁，
-     * 紧接着借一条可能分到旧连接（旧密码仍有效）→ 误判。
-     * 解法：连续借多条并 isValid，确认至少能以新凭据成功建连。
+     * 旁路验证：不经池，直接用 DriverManager 以新凭据建连。
+     * 结论确定——不受池中旧连接（reconfigure 后仍可能借出旧会话）干扰。
      */
-    private boolean verifyNewCredentials() {
-        for (int i = 0; i < VERIFY_BORROWS; i++) {
-            try (Connection c = poolDataSource.getConnection()) {
-                if (!c.isValid(3)) {
-                    return false;
-                }
-            } catch (Exception e) {
-                log.warn("Verify borrow #{} failed: {}", i, e.toString());
-                return false;
-            }
+    private boolean verifyNewCredentials(String jdbcUrl, DbCredentials credentials) {
+        try (Connection connection = DriverManager.getConnection(
+                jdbcUrl, credentials.username(), credentials.password())) {
+            return connection.isValid(VALIDATION_TIMEOUT_SECONDS);
+        } catch (Exception exception) {
+            log.warn("Out-of-band credential check failed: {}", exception.toString());
+            return false;
         }
-        return true;
+    }
+
+    /** DataSource 可能被 LazyConnectionDataSourceProxy 包装（connection-fetch=lazy），需 unwrap 到真实 PoolDataSource */
+    private static PoolDataSource unwrap(DataSource dataSource) {
+        try {
+            return dataSource.isWrapperFor(PoolDataSource.class)
+                    ? dataSource.unwrap(PoolDataSource.class)
+                    : (PoolDataSource) dataSource;
+        } catch (SQLException exception) {
+            throw new IllegalStateException("Failed to unwrap UCP PoolDataSource", exception);
+        }
     }
 }
