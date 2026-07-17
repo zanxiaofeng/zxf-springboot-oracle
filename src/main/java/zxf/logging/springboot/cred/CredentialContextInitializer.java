@@ -27,7 +27,7 @@ public class CredentialContextInitializer implements ApplicationContextInitializ
     public void initialize(ConfigurableApplicationContext applicationContext) {
         ConfigurableEnvironment environment = applicationContext.getEnvironment();
         // 上下文创建前无 Bean 可注入，直接 new 文件源（与运行期共享同一读取逻辑）
-        String dirPath = environment.getProperty("DB_CRED_DIR", "/etc/secrets/db");
+        String dirPath = environment.getProperty("DB_CRED_DIR", "~/secrets/db");
         CredentialFileSource fileSource = new CredentialFileSource(Path.of(dirPath));
         if (!fileSource.isAvailable()) {
             log.info("Credential dir not available, skipping hot-reload; using datasource credentials from config");
