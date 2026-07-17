@@ -779,7 +779,7 @@ public class UcpCredentialApplier {
 
 #### 6.3.5 启动接线与变更监听（Bootstrap / Listener）
 
-启动接线与事件应用分属不同生命周期，拆为两个类。两者都监听 ApplicationReadyEvent，但互不依赖执行顺序（启动对齐不依赖 watcher 已启动）。
+启动接线与事件应用分属不同生命周期，拆为两个类。两者都监听 ApplicationReadyEvent；`CredentialWatchBootstrap` 以 `@Order(HIGHEST_PRECEDENCE)` 保证先完成 WatchService 注册，使随后的启动对齐重读能完全收口「ContextInitializer 注入 → 监听注册」间的变更窗口。
 
 ```java
 package zxf.logging.springboot.cred;
@@ -788,6 +788,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
@@ -804,6 +806,12 @@ public class CredentialWatchBootstrap {
     private final CredentialFileSource fileSource;
     private final SecretDirectoryWatcher watcher;
 
+    /**
+     * @Order 保证先于其他 ApplicationReadyEvent 监听完成 WatchService 注册——
+     * 先注册、再由 CredentialsChangedListener#alignOnStartup 重读一次，
+     * 才能完全收口「ContextInitializer 注入 → 监听注册」间的凭据变更窗口。
+     */
+    @Order(Ordered.HIGHEST_PRECEDENCE)
     @EventListener(ApplicationReadyEvent.class)
     void start() {
         if (!fileSource.isAvailable()) {
@@ -843,7 +851,9 @@ public class CredentialsChangedListener {
 
     /**
      * 启动对齐：lastApplied 为空，会以相同凭据触发一次 reconfigure（幂等），
-     * 同时验证「读文件 → 应用」链路可用。与 CredentialWatchBootstrap 无顺序依赖。
+     * 同时验证「读文件 → 应用」链路可用。
+     * 依赖 CredentialWatchBootstrap（@Order(HIGHEST_PRECEDENCE)）先完成 WatchService 注册，
+     * 本次重读才能完全收口「ContextInitializer 注入 → 监听注册」间的变更窗口。
      */
     @EventListener(ApplicationReadyEvent.class)
     void alignOnStartup() {

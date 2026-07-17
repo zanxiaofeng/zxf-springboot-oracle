@@ -19,7 +19,9 @@ public class CredentialsChangedListener {
 
     /**
      * 启动对齐：lastApplied 为空，会以相同凭据触发一次 reconfigure（幂等），
-     * 同时验证「读文件 → 应用」链路可用。与 CredentialWatchBootstrap 无顺序依赖。
+     * 同时验证「读文件 → 应用」链路可用。
+     * 依赖 CredentialWatchBootstrap（@Order(HIGHEST_PRECEDENCE)）先完成 WatchService 注册，
+     * 本次重读才能完全收口「ContextInitializer 注入 → 监听注册」间的变更窗口。
      */
     @EventListener(ApplicationReadyEvent.class)
     void alignOnStartup() {
