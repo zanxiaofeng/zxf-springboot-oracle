@@ -30,7 +30,8 @@ public class CredentialContextInitializer implements ApplicationContextInitializ
         String dirPath = environment.getProperty("DB_CRED_DIR", "/etc/secrets/db");
         CredentialFileSource fileSource = new CredentialFileSource(Path.of(dirPath));
         if (!fileSource.isAvailable()) {
-            return; // dev/无挂载：回退到 application.yml
+            log.info("Credential dir not available, skipping hot-reload; using datasource credentials from config");
+            return;
         }
         inject(environment, fileSource);
     }
@@ -40,6 +41,7 @@ public class CredentialContextInitializer implements ApplicationContextInitializ
         try {
             DbCredentials credentials = fileSource.read();
             if (credentials.isEmpty()) {
+                log.warn("Empty credentials, skipping injection");
                 return;
             }
             MutablePropertySources propertySources = environment.getPropertySources();

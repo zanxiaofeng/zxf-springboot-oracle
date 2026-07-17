@@ -19,7 +19,6 @@ import java.nio.file.WatchService;
 @Component
 @RequiredArgsConstructor
 public class CredentialFileSource {
-
     /** @Value 经 lombok.config copyableAnnotations 复制到构造参数，实现构造注入 */
     @Value("${DB_CRED_DIR:/etc/secrets/db}")
     private final Path dir;

@@ -22,7 +22,6 @@ import java.util.concurrent.atomic.AtomicReference;
 @Component
 @RequiredArgsConstructor
 public class CredentialChangeNotifier {
-
     private final ApplicationEventPublisher publisher;
     private final Debouncer debouncer = new Debouncer();
 
@@ -45,7 +44,6 @@ public class CredentialChangeNotifier {
      * 事件监听在该单线程上同步执行，刷新天然串行，无需加锁。
      */
     static final class Debouncer {
-
         /** 去抖窗口：K8s symlink 原子替换会在极短时间内触发多次事件 */
         private static final Duration DEBOUNCE = Duration.ofMillis(800);
 

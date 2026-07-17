@@ -17,7 +17,6 @@ import java.sql.SQLException;
 @Component("dynamicDbHealth")
 @RequiredArgsConstructor
 public class DatabaseHealthIndicator implements HealthIndicator {
-
     /** 借连验证的超时秒数 */
     private static final int VALIDATION_TIMEOUT_SECONDS = 2;
 

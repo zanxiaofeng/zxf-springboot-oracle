@@ -14,7 +14,6 @@ import org.springframework.stereotype.Service;
 @Service
 @RequiredArgsConstructor
 public class CredentialsChangedListener {
-
     private final CredentialFileSource fileSource;
     private final UcpCredentialApplier applier;
 
@@ -25,7 +24,8 @@ public class CredentialsChangedListener {
     @EventListener(ApplicationReadyEvent.class)
     void alignOnStartup() {
         if (!fileSource.isAvailable()) {
-            return;   // dev：无挂载，跳过
+            log.warn("Credential file not available, skip align");
+            return;
         }
         refresh();
     }
