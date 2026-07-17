@@ -15,14 +15,14 @@ import java.util.logging.Logger;
 public class OracleDiagnostic {
 
     public static void julConfig() {
-        System.out.println("Checking JUL Configuration.............");
+        System.out.println("1. Checking JUL Configuration.............");
         System.out.println("1.0 Check config setting.............");
         String configClassFromSysProp = System.getProperty("java.util.logging.config.class");
-        System.out.println("1.1 Check config class setting from system property java.util.logging.config.class, " + configClassFromSysProp);
+        System.out.println("1.1 Check config class setting from system property java.util.logging.config.class: " + configClassFromSysProp);
         String configFileFromSysProp = System.getProperty("java.util.logging.config.file");
-        System.out.println("1.2 Check config file setting from system property java.util.logging.config.file, as local path, " + configFileFromSysProp);
+        System.out.println("1.2 Check config file setting from system property java.util.logging.config.file: " + configFileFromSysProp + ", exists: " + Path.of(configFileFromSysProp).toFile().exists());
         String configFileDefault = Path.of(System.getProperty("java.home"), "conf", "logging.properties").toString();
-        System.out.println("1.3 Check default config file {java.home}/conf/logging.properties, as local path, " + configFileDefault);
+        System.out.println("1.3 Check default config file {java.home}/conf/logging.properties: " + configFileDefault + ", exists: " + Path.of(configFileDefault).toFile().exists());
     }
 
     public static void setupSystemProperties() {
@@ -33,6 +33,7 @@ public class OracleDiagnostic {
         System.setProperty("oracle.ucp.diagnostic.loggingLevel", "FINEST");
         //Setting by log file will be overridded by springboot logging settings(Default: INFO for root logger) or oracle.ucp.diagnostic.loggingLevel
         System.setProperty("java.util.logging.config.file", "./src/main/resources/my-jul.properties");
+        System.out.println("0. Setup System Properties for Oracle Diagnostic");
     }
 
     public void oracleJdbc(Boolean setting) {
@@ -41,6 +42,7 @@ public class OracleDiagnostic {
         Logger jdbcLogger = Logger.getLogger(logName);
         log.info("Oracle JDBC Logging - %s, handlers=%s, level=%s".formatted(logName, jdbcLogger.getHandlers().toString(), jdbcLogger.getLevel()));
         if (setting != null && setting) {
+            log.info("Setting Oracle JDBC Logging to FINEST");
             //Set by Logger
             jdbcLogger.setLevel(Level.FINEST);
             //Set by Diagnosable

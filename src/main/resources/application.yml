@@ -13,7 +13,7 @@ spring:
     oracleucp:
       connection-factory-class-name: oracle.jdbc.pool.OracleDataSource
       connection-pool-name: pool-test
-      s-q-l-for-validate-connection: select * from dual
+      sql-for-validate-connection: select * from dual
       fast-connection-failover-enabled: true
       validate-connection-on-borrow: true
       initial-pool-size: 0

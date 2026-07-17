@@ -12,7 +12,7 @@
 | ESO | v2.x（2026-07 当前 v2.6.x） | API `external-secrets.io/v1` 稳定；Vault provider 仅支持 KV 引擎，database 引擎须用 `VaultDynamicSecret` generator（§3） |
 | Kubernetes | 1.29+ | 无特殊特性依赖 |
 
-> 本方案不引入 Oracle 的 `oracle-spring-boot-starter-ucp`：`spring.datasource.oracleucp.*` 前缀自 Spring Boot 2.4 起即由 `DataSourceConfiguration.OracleUcp` 原生绑定（与 hikari/tomcat/dbcp2 同级），减少一个跨大版本兼容性变量。
+> 本方案不引入 Oracle 的 `oracle-spring-boot-starter-ucp`：`spring.datasource.oracleucp.*` 前缀自 Spring Boot 2.4 起即由 `DataSourceConfiguration.OracleUcp` 原生绑定（与 hikari/tomcat/dbcp2 同级；Boot 4.x 位于 `spring-boot-jdbc` 模块），无需额外 starter。该 starter 还会连带引入 `ojdbc11` + `ucp`（无后缀 JDK11 变体），与显式声明的 `ojdbc17` + `ucp17` 形成重复类路径——这是又一排除理由。
 
 ## 2. Vault Static Role 配置（Oracle）
 
@@ -261,39 +261,62 @@ spec:
 </dependencyManagement>
 ```
 
-### 5.2 application.properties
+### 5.2 application.yml
 
 `spring.datasource.ucp.*` 不是受支持的命名空间；UCP 专有属性使用 `spring.datasource.oracleucp.*` 前缀，自 Spring Boot 2.4 起原生绑定（`DataSourceConfiguration.OracleUcp`），无需额外 starter。
 
-启动凭据由 §6.2 的 CredentialContextInitializer 在上下文创建前以最高优先级注入 `spring.datasource.username/password`，覆盖下方 PLACEHOLDER，确保 Flyway/JPA 启动阶段即用真实凭据。
+启动凭据由 §6.2 的 CredentialContextInitializer 在上下文创建前以最高优先级注入 `spring.datasource.username/password`，覆盖下方占位符，确保 Flyway/JPA 启动阶段即用真实凭据。
 
-```properties
-spring.datasource.url=jdbc:oracle:thin:@//oracle:1521/XEPDB1
-spring.datasource.driver-class-name=oracle.jdbc.OracleDriver
-spring.datasource.type=oracle.ucp.jdbc.PoolDataSource
+下方为本仓库 `application.yml`（YAML）。URL 与凭据以生产形态给出（K8s service DNS / 占位符）；本仓库 dev 演示实际对接 docker-compose 的 Oracle Free（`localhost:1521/FREE`），连接池容量为演示值，生产请按注释调大。
 
-# dev 兜底占位符：K8s 环境下会被 §6.2 ContextInitializer 注入的真实凭据覆盖
-# dev 环境请通过 profile 或环境变量提供真实凭据
-spring.datasource.username=PLACEHOLDER
-spring.datasource.password=PLACEHOLDER
-
-# 保持 eager（默认）：lazy 会用 LazyConnectionDataSourceProxy 包装池，§6.3/§6.4 已用 unwrap 兼容；
-# 若显式设 lazy，务必保留 unwrap 逻辑，否则直接强转 PoolDataSource 会失败。
-spring.datasource.connection-fetch=eager
-
-# UCP 调优（spring.datasource.oracleucp.* 原生绑定）
-spring.datasource.oracleucp.initial-pool-size=2
-spring.datasource.oracleucp.min-pool-size=2
-spring.datasource.oracleucp.max-pool-size=20
-spring.datasource.oracleucp.validate-connection-on-borrow=true
-spring.datasource.oracleucp.sql-for-validate-connection=SELECT 1 FROM DUAL
-# 23.26 起 setConnectionWaitTimeout(int) 已废弃，使用 Duration 版本（如 5s）
-spring.datasource.oracleucp.connection-wait-duration=5s
-spring.datasource.oracleucp.inactive-connection-timeout=300
+```yaml
+spring:
+  threads:
+    virtual:
+      enabled: true          # §1 虚拟线程基线；Tomcat/@Async/调度任务自动使用虚拟线程
+  datasource:
+    url: jdbc:oracle:thin:@//oracle:1521/XEPDB1   # dev 演示：jdbc:oracle:thin:@//localhost:1521/FREE
+    driver-class-name: oracle.jdbc.OracleDriver
+    type: oracle.ucp.jdbc.PoolDataSource
+    # dev 兜底占位符：K8s 环境会被 §6.2 ContextInitializer 注入的真实凭据覆盖；
+    # dev 环境请通过 profile 或环境变量提供真实凭据
+    username: PLACEHOLDER
+    password: PLACEHOLDER
+    # 保持 eager（默认）：lazy 会用 LazyConnectionDataSourceProxy 包装池，§6.3/§6.4 已用 unwrap 兼容；
+    # 若显式设 lazy，务必保留 unwrap 逻辑，否则直接强转 PoolDataSource 会失败。
+    connection-fetch: eager
+    # UCP 调优（spring.datasource.oracleucp.* 原生绑定）
+    oracleucp:
+      connection-factory-class-name: oracle.jdbc.pool.OracleDataSource
+      connection-pool-name: pool-test
+      sql-for-validate-connection: select * from dual
+      validate-connection-on-borrow: true
+      connection-validate-timeout: 5
+      # 演示小池；生产按需调大（如 initial/min 2、max 20）
+      initial-pool-size: 0
+      min-pool-size: 0
+      max-pool-size: 3
+      # 23.26 起 setConnectionWaitTimeout(int) 已废弃，使用 Duration 版本
+      connection-wait-duration: 15S
+      inactive-connection-timeout: 60
+      max-connection-reuse-time: 300
+      abandoned-connection-timeout: 60
+      time-to-live-connection-timeout: 180
+      # Fast Connection Failover 需 ons 依赖（§5.1）
+      fast-connection-failover-enabled: true
+      connection-properties:
+        oracle.jdbc.defaultLobPrefetchSize: 4000
+        oracle.net.keepAlive: true
+        oracle.net.TCP_KEEPIDLE: 60
 
 # Actuator：关闭默认 db 健康检查，使用 §6.4 自定义 dynamicDbHealth（避免与热刷竞争借连接）
-management.endpoint.health.show-details=always
-management.health.db.enabled=false
+management:
+  endpoint:
+    health:
+      show-details: always
+  health:
+    db:
+      enabled: false
 ```
 
 ## 6. Java 代码：凭据热刷
@@ -355,7 +378,6 @@ import java.nio.file.WatchService;
 @Component
 @RequiredArgsConstructor
 public class CredentialFileSource {
-
     /** @Value 经 lombok.config copyableAnnotations 复制到构造参数，实现构造注入 */
     @Value("${DB_CRED_DIR:/etc/secrets/db}")
     private final Path dir;
@@ -409,8 +431,8 @@ import java.util.Map;
 
 /**
  * 在上下文 refresh 前（ApplicationContextInitializer）把 K8s 挂载的 Vault Static Role 凭据
- * 注入 Environment 最高优先级，覆盖 application.properties，确保 DataSource/Flyway/JPA 启动即用真实凭据。
- * dev（无挂载文件）时回退到 application.properties。
+ * 注入 Environment 最高优先级，覆盖 application.yml，确保 DataSource/Flyway/JPA 启动即用真实凭据。
+ * dev（无挂载文件）时回退到 application.yml。
  */
 @Slf4j
 public class CredentialContextInitializer implements ApplicationContextInitializer<ConfigurableApplicationContext> {
@@ -422,7 +444,8 @@ public class CredentialContextInitializer implements ApplicationContextInitializ
         String dirPath = environment.getProperty("DB_CRED_DIR", "/etc/secrets/db");
         CredentialFileSource fileSource = new CredentialFileSource(Path.of(dirPath));
         if (!fileSource.isAvailable()) {
-            return; // dev/无挂载：回退到 application.properties
+            log.info("Credential dir not available, skipping hot-reload; using datasource credentials from config");
+            return;
         }
         inject(environment, fileSource);
     }
@@ -432,6 +455,7 @@ public class CredentialContextInitializer implements ApplicationContextInitializ
         try {
             DbCredentials credentials = fileSource.read();
             if (credentials.isEmpty()) {
+                log.warn("Empty credentials, skipping injection");
                 return;
             }
             MutablePropertySources propertySources = environment.getPropertySources();
@@ -612,7 +636,6 @@ import java.util.concurrent.atomic.AtomicReference;
 @Component
 @RequiredArgsConstructor
 public class CredentialChangeNotifier {
-
     private final ApplicationEventPublisher publisher;
     private final Debouncer debouncer = new Debouncer();
 
@@ -635,7 +658,6 @@ public class CredentialChangeNotifier {
      * 事件监听在该单线程上同步执行，刷新天然串行，无需加锁。
      */
     static final class Debouncer {
-
         /** 去抖窗口：K8s symlink 原子替换会在极短时间内触发多次事件 */
         private static final Duration DEBOUNCE = Duration.ofMillis(800);
 
@@ -772,7 +794,7 @@ import java.io.IOException;
 
 /**
  * 启动接线：应用就绪后启动目录监听。
- * dev（无挂载文件）时跳过，沿用 application.properties 凭据。
+ * dev（无挂载文件）时跳过，沿用 application.yml 凭据。
  */
 @Slf4j
 @Component
@@ -816,7 +838,6 @@ import org.springframework.stereotype.Service;
 @Service
 @RequiredArgsConstructor
 public class CredentialsChangedListener {
-
     private final CredentialFileSource fileSource;
     private final UcpCredentialApplier applier;
 
@@ -827,7 +848,8 @@ public class CredentialsChangedListener {
     @EventListener(ApplicationReadyEvent.class)
     void alignOnStartup() {
         if (!fileSource.isAvailable()) {
-            return;   // dev：无挂载，跳过
+            log.warn("Credential file not available, skip align");
+            return;
         }
         refresh();
     }
@@ -869,7 +891,6 @@ import java.sql.SQLException;
 @Component("dynamicDbHealth")
 @RequiredArgsConstructor
 public class DatabaseHealthIndicator implements HealthIndicator {
-
     /** 借连验证的超时秒数 */
     private static final int VALIDATION_TIMEOUT_SECONDS = 2;
 

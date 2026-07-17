@@ -1,6 +1,6 @@
 # Configuration Schema
-- spring-boot-autoconfigure-2.7.18.jar!/META-INF/spring-configuration-metadata.json
-- ucp-21.5.0.0.jar!/oracle/ucp/xml/configuration.xsd
+- spring-boot-jdbc-4.1.0.jar!/META-INF/spring-configuration-metadata.json
+- ucp17-23.26.2.0.0.jar!/oracle/ucp/xml/configuration.xsd
 
 # Core classes of Oracle Jdbc
 - oracle.jdbc.OracleConnection.CONNECTION_PROPERTY_NET_KEEPALIVE
@@ -13,13 +13,13 @@
 - oracle.jdbc.OracleConnection.CONNECTION_PROPERTY_DIAGNOSTIC_LOGGER_NAME_DEFAULT
 - oracle.jdbc.OracleConnection.CONNECTION_PROPERTY_ENABLE_LOGGING
 - oracle.jdbc.OracleConnection.CONNECTION_PROPERTY_ENABLE_LOGGING_DEFAULT
-- ojdbc8-23.4.0.24.05.jar!/oracle/jdbc/diagnostics/CommonDiagnosable.class
+- ojdbc17-23.26.2.0.0.jar!/oracle/jdbc/diagnostics/CommonDiagnosable.class
 
 # Core classes of Oracle Ucp
 - oracle.ucp.jdbc.PoolDataSource.SYSTEM_PROPERTY_TIMERS_AFFECT_ALL_CONNECTIONS
 - oracle.ucp.jdbc.PoolDataSource.SYSTEM_PROPERTY_DIAGNOSTIC_ENABLE_LOGGING
 - oracle.ucp.jdbc.PoolDataSource.SYSTEM_PROPERTY_DIAGNOSTIC_LOGGING_LEVEL
-- ucp-23.4.0.24.05.jar!/oracle/ucp/diagnostics/DiagnosticsCollectorImpl.class
+- ucp17-23.26.2.0.0.jar!/oracle/ucp/diagnostics/DiagnosticsCollectorImpl.class
 
 # oracle.jdbc.defaultConnectionValidation
 - "SERVER" (or "COMPLETE") makes the driver execute a basic SQL query "SELECT 'x' FROM DUAL".

@@ -12,10 +12,11 @@ This is a Spring Boot 4.1.0 application demonstrating Oracle JDBC and UCP (Unive
 # Build the project
 mvn clean package
 
-# Run the application (default profile: dev)
+# Run the application (the active system-properties branch activates no Spring profile;
+# diagnostics come from system properties)
 mvn spring-boot:run
 
-# Run with specific profile
+# Also apply application-dev.yml (trace-level oracle.jdbc / oracle.ucp logging)
 mvn spring-boot:run -Dspring-boot.run.profiles=dev
 
 # Start Oracle database (required)
@@ -24,15 +25,14 @@ docker-compose up -d
 
 ## Architecture
 
-### Entry Points
+### Entry Point
 
-Two main application classes demonstrate different approaches to configuring Oracle diagnostics:
+`OracleApplication` is the single entry point. Its `main` method keeps a manual `if/else` toggle (flip the literal to switch) between two ways of configuring Oracle diagnostics:
 
-- **`ApplicationWithSystemProperties`** - Sets up Oracle diagnostic system properties programmatically before Spring Boot starts. Use this for full diagnostic control.
+- **System-properties branch** (`if (true)`, active) — calls `OracleDiagnostic.setupSystemProperties()` to set Oracle JDBC/UCP diagnostic system properties before Spring Boot starts. Use this for full diagnostic control. It is self-contained and does **not** activate the `dev` profile.
+- **Plain branch** (`else`) — relies on Spring Boot configuration only and activates the `dev` profile. Use this for the standard Spring configuration approach.
 
-- **`ApplicationWithoutSystemProperties`** - Relies on Spring Boot configuration properties only. Use this for standard Spring configuration approach.
-
-Both classes activate the `dev` profile by default.
+(The former `ApplicationWithSystemProperties` / `ApplicationWithoutSystemProperties` pair was merged into this single class.)
 
 ### Oracle Diagnostic Configuration
 
@@ -53,6 +53,15 @@ Diagnostic logging is controlled via:
 3. Spring Boot logging levels
 4. JUL configuration file
 5. Oracle defaults (lowest priority)
+
+## Credential Hot-Reload (Vault Static Role)
+
+The `zxf.logging.springboot.cred` package implements hot-reload of Vault Static Role DB credentials (full design: `docs/Vault Static Role 凭据热更新方案(Spring Boot 4.1 + JDK 21).md`).
+
+- `CredentialContextInitializer` (registered in `META-INF/spring.factories`) injects `spring.datasource.username/password` from mounted files before context refresh, so the pool starts with real credentials.
+- Credential files are read from `DB_CRED_DIR` (default `/etc/secrets/db`). When the directory is absent (local dev), hot-reload is skipped and the configured credentials are used.
+- Runtime flow: `SecretDirectoryWatcher` (WatchService) → `CredentialChangeNotifier` (debounce) → `CredentialsChangedEvent` → `CredentialsChangedListener` → `UcpCredentialApplier` (`PoolDataSource.reconfigureDataSource`).
+- `DatabaseHealthIndicator` (`dynamicDbHealth`) replaces the default db health check (`management.health.db.enabled=false`) to avoid borrowing connections during a credential refresh.
 
 ## Connection Validation Modes
 
