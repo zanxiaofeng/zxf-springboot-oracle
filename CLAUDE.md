@@ -59,7 +59,7 @@ Diagnostic logging is controlled via:
 The `zxf.logging.springboot.cred` package implements hot-reload of Vault Static Role DB credentials (full design: `docs/Vault Static Role 凭据热更新方案(Spring Boot 4.1 + JDK 21).md`).
 
 - `CredentialContextInitializer` (registered in `META-INF/spring.factories`) injects `spring.datasource.username/password` from mounted files before context refresh, so the pool starts with real credentials.
-- Credential files are read from `DB_CRED_DIR` (default `./.etc/secrets/db`). When the directory is absent (local dev), hot-reload is skipped and the configured credentials are used.
+- Credential files are read from `DB_CRED_DIR` (default `/etc/secrets/db`). When the directory is absent (local dev), hot-reload is skipped and the configured credentials are used.
 - Runtime flow: `SecretDirectoryWatcher` (WatchService) → `CredentialChangeNotifier` (debounce) → `CredentialsChangedEvent` → `CredentialsChangedListener` → `UcpCredentialApplier` (`PoolDataSource.reconfigureDataSource`).
 - `DatabaseHealthIndicator` (`dynamicDbHealth`) replaces the default db health check (`management.health.db.enabled=false`) to avoid borrowing connections during a credential refresh.
 
