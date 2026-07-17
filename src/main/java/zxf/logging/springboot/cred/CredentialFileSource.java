@@ -33,6 +33,11 @@ public class CredentialFileSource {
         return new DbCredentials(username.trim(), password.trim());
     }
 
+    /** 写回新密码（模拟 ESO/kubelet 更新挂载文件），触发 watcher 热刷管线 */
+    public void writePassword(String newPassword) throws IOException {
+        Files.writeString(passwordFile(), newPassword);
+    }
+
     /** Tell 风格：由文件源自己完成 WatchService 注册，而非暴露 dir 供外部询问 */
     public void registerOn(WatchService watchService) throws IOException {
         dir.register(watchService,
