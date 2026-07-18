@@ -73,6 +73,7 @@ public class UcpCredentialApplier {
                 // 直接用 setter 改连接工厂配置，池首次启动时即以新凭据建连
                 pool.setUser(credentials.username());
                 pool.setPassword(credentials.password());
+                log.warn("UCP pool not started, reconfigureDataSource failed with UCP-76; using setters instead");
             }
 
             UniversalConnectionPoolManagerImpl.getUniversalConnectionPoolManager().refreshConnectionPool(pool.getConnectionPoolName());
