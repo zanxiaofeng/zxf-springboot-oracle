@@ -11,3 +11,4 @@ logging:
     oracle.jdbc: trace
     oracle.ucp: trace
     pool-test: debug
+    zxf.logging.springboot.cred: debug

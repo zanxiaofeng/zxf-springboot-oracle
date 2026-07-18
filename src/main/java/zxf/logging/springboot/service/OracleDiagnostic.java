@@ -20,7 +20,7 @@ public class OracleDiagnostic {
         String configClassFromSysProp = System.getProperty("java.util.logging.config.class");
         System.out.println("1.1 Check config class setting from system property java.util.logging.config.class: " + configClassFromSysProp);
         String configFileFromSysProp = System.getProperty("java.util.logging.config.file");
-        System.out.println("1.2 Check config file setting from system property java.util.logging.config.file: " + configFileFromSysProp + ", exists: " + Path.of(configFileFromSysProp).toFile().exists());
+        System.out.println("1.2 Check config file setting from system property java.util.logging.config.file: " + configFileFromSysProp);
         String configFileDefault = Path.of(System.getProperty("java.home"), "conf", "logging.properties").toString();
         System.out.println("1.3 Check default config file {java.home}/conf/logging.properties: " + configFileDefault + ", exists: " + Path.of(configFileDefault).toFile().exists());
     }

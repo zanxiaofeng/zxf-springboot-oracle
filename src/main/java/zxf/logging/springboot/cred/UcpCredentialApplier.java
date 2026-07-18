@@ -2,6 +2,7 @@ package zxf.logging.springboot.cred;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import oracle.ucp.admin.UniversalConnectionPoolManagerImpl;
 import oracle.ucp.jdbc.PoolDataSource;
 import org.springframework.stereotype.Component;
 
@@ -19,15 +20,20 @@ import java.sql.SQLException;
 @RequiredArgsConstructor
 public class UcpCredentialApplier {
 
-    /** 借连验证的超时秒数 */
+    /**
+     * 借连验证的超时秒数
+     */
     private static final int VALIDATION_TIMEOUT_SECONDS = 3;
 
     private final DataSource dataSource;
-    /** 上次成功应用的凭据缓存；用于变更比较，避免调用已废弃的 PoolDataSource.getPassword() */
+    /**
+     * 上次成功应用的凭据缓存；用于变更比较，避免调用已废弃的 PoolDataSource.getPassword()
+     */
     private volatile DbCredentials lastApplied = DbCredentials.EMPTY;
 
     /**
      * 应用凭据：相同则跳过；不同则先旁路验证，再 reconfigure。
+     *
      * @return true=已切换或无变化；false=验证失败（池未被改动，旧凭据继续服务，等下轮事件）
      */
     public boolean apply(DbCredentials credentials) {
@@ -42,7 +48,9 @@ public class UcpCredentialApplier {
         return doApply(credentials);
     }
 
-    /** 验证 → 切换 → 记录；任何异常仅记消息（异常信息可能携带含密码的 Properties） */
+    /**
+     * 验证 → 切换 → 记录；任何异常仅记消息（异常信息可能携带含密码的 Properties）
+     */
     private boolean doApply(DbCredentials credentials) {
         try {
             // unwrap 是纯函数且代价可忽略，按次解出，不持有派生状态字段
@@ -53,14 +61,21 @@ public class UcpCredentialApplier {
                 return false;
             }
             log.info("Refreshing UCP credentials for user: {}", credentials.username());
-            pool.reconfigureDataSource(credentials.toProperties());
+
+            // 池未启动（initialPoolSize=0 时首次借连前 UCP 懒建池），reconfigureDataSource 会抛 UCP-76；
+            // 直接用 setter 改连接工厂配置，池首次启动时即以新凭据建连
+            pool.setUser(credentials.username());
+            pool.setPassword(credentials.password());
+
+            //pool.reconfigureDataSource(credentials.toProperties());
+
+            UniversalConnectionPoolManagerImpl.getUniversalConnectionPoolManager().reconfigureConnectionPool(pool.getConnectionPoolName(), credentials.toProperties());
+            log.info("UCP credentials refreshed. borrowed={}, available={}", pool.getBorrowedConnectionsCount(), pool.getAvailableConnectionsCount());
+
             lastApplied = credentials;
-            log.info("UCP credentials refreshed. borrowed={}, available={}",
-                    pool.getBorrowedConnectionsCount(),
-                    pool.getAvailableConnectionsCount());
             return true;
-        } catch (Exception exception) {
-            log.error("Failed to refresh UCP credentials: {}", exception.toString());
+        } catch (Exception ex) {
+            log.error("Failed to refresh UCP credentials: {}", ex, ex);
             return false;
         }
     }
@@ -79,7 +94,9 @@ public class UcpCredentialApplier {
         }
     }
 
-    /** DataSource 可能被 LazyConnectionDataSourceProxy 包装（connection-fetch=lazy），需 unwrap 到真实 PoolDataSource */
+    /**
+     * DataSource 可能被 LazyConnectionDataSourceProxy 包装（connection-fetch=lazy），需 unwrap 到真实 PoolDataSource
+     */
     private static PoolDataSource unwrap(DataSource dataSource) {
         try {
             return dataSource.isWrapperFor(PoolDataSource.class)

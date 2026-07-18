@@ -10,7 +10,7 @@ import zxf.logging.springboot.service.OracleDiagnostic;
 public class OracleApplication {
     public static void main(String[] args) {
         System.setProperty("DB_CRED_DIR", "./.etc/secrets/db");
-        if (true) {
+        if (false) {
             // With system properties
             OracleDiagnostic.setupSystemProperties();
             OracleDiagnostic.julConfig();
