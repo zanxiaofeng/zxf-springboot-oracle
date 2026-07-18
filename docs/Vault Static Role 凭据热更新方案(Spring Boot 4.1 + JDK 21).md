@@ -206,6 +206,12 @@ spec:
 </properties>
 
 <dependencies>
+    <!-- Boot 3→4 迁移期辅助：对旧属性名告警/临时兼容，迁移稳定后可移除 -->
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-properties-migrator</artifactId>
+        <scope>runtime</scope>
+    </dependency>
     <dependency>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-webmvc</artifactId>
@@ -246,7 +252,39 @@ spec:
         <artifactId>lombok</artifactId>
         <scope>provided</scope>
     </dependency>
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-test</artifactId>
+        <scope>test</scope>
+    </dependency>
 </dependencies>
+
+<build>
+    <plugins>
+        <plugin>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-maven-plugin</artifactId>
+        </plugin>
+        <!-- OpenRewrite：Boot 4 一次性迁移工具（UpgradeSpringBoot_4_0 配方），随时可移除 -->
+        <plugin>
+            <groupId>org.openrewrite.maven</groupId>
+            <artifactId>rewrite-maven-plugin</artifactId>
+            <version>6.43.0</version>
+            <configuration>
+                <activeRecipes>
+                    <recipe>org.openrewrite.java.spring.boot4.UpgradeSpringBoot_4_0</recipe>
+                </activeRecipes>
+            </configuration>
+            <dependencies>
+                <dependency>
+                    <groupId>org.openrewrite.recipe</groupId>
+                    <artifactId>rewrite-spring</artifactId>
+                    <version>6.34.0</version>
+                </dependency>
+            </dependencies>
+        </plugin>
+    </plugins>
+</build>
 
 <dependencyManagement>
     <dependencies>
@@ -265,51 +303,46 @@ spec:
 
 `spring.datasource.ucp.*` 不是受支持的命名空间；UCP 专有属性使用 `spring.datasource.oracleucp.*` 前缀，自 Spring Boot 2.4 起原生绑定（`DataSourceConfiguration.OracleUcp`），无需额外 starter。
 
-启动凭据由 §6.2 的 CredentialContextInitializer 在上下文创建前以最高优先级注入 `spring.datasource.username/password`，覆盖下方占位符，确保 Flyway/JPA 启动阶段即用真实凭据。
+启动凭据由 §6.2 的 CredentialContextInitializer 在上下文创建前以最高优先级注入 `spring.datasource.username/password`，覆盖 yml 中的 dev 凭据，确保 Flyway/JPA 启动阶段即用真实凭据。
 
-下方为本仓库 `application.yml`（YAML）。URL 与凭据以生产形态给出（K8s service DNS / 占位符）；本仓库 dev 演示实际对接 docker-compose 的 Oracle Free（`localhost:1521/FREE`），连接池容量为演示值，生产请按注释调大。
+下方为本仓库 `application.yml` 实际内容：dev 演示对接 docker-compose 的 Oracle Free（`localhost:1521/FREE`，`system/123456`）。K8s 部署时把 URL 换成 service DNS、凭据由 §6.2 注入覆盖即可；连接池容量为演示值，生产请按需调大。
 
 ```yaml
 spring:
   threads:
     virtual:
-      enabled: true          # §1 虚拟线程基线；Tomcat/@Async/调度任务自动使用虚拟线程
+      enabled: true
   datasource:
-    url: jdbc:oracle:thin:@//oracle:1521/XEPDB1   # dev 演示：jdbc:oracle:thin:@//localhost:1521/FREE
+    url: jdbc:oracle:thin:@//localhost:1521/FREE   # K8s：jdbc:oracle:thin:@//oracle:1521/XEPDB1
+    username: system        # dev 凭据；K8s 由 §6.2 ContextInitializer 注入覆盖
+    password: 123456
     driver-class-name: oracle.jdbc.OracleDriver
     type: oracle.ucp.jdbc.PoolDataSource
-    # dev 兜底占位符：K8s 环境会被 §6.2 ContextInitializer 注入的真实凭据覆盖；
-    # dev 环境请通过 profile 或环境变量提供真实凭据
-    username: PLACEHOLDER
-    password: PLACEHOLDER
-    # 保持 eager（默认）：lazy 会用 LazyConnectionDataSourceProxy 包装池，§6.3/§6.4 已用 unwrap 兼容；
-    # 若显式设 lazy，务必保留 unwrap 逻辑，否则直接强转 PoolDataSource 会失败。
+    # eager（默认）：避免 LazyConnectionDataSourceProxy 包装池，凭据热刷新代码直接 unwrap 拿到 PoolDataSource
     connection-fetch: eager
-    # UCP 调优（spring.datasource.oracleucp.* 原生绑定）
     oracleucp:
       connection-factory-class-name: oracle.jdbc.pool.OracleDataSource
       connection-pool-name: pool-test
       sql-for-validate-connection: select * from dual
+      fast-connection-failover-enabled: true   # 需 ons 依赖（§5.1）；未配 ONS 时仅启动告警
       validate-connection-on-borrow: true
-      connection-validate-timeout: 5
       # 演示小池；生产按需调大（如 initial/min 2、max 20）
       initial-pool-size: 0
       min-pool-size: 0
       max-pool-size: 3
       # 23.26 起 setConnectionWaitTimeout(int) 已废弃，使用 Duration 版本
       connection-wait-duration: 15S
+      connection-validate-timeout: 5
       inactive-connection-timeout: 60
       max-connection-reuse-time: 300
       abandoned-connection-timeout: 60
       time-to-live-connection-timeout: 180
-      # Fast Connection Failover 需 ons 依赖（§5.1）
-      fast-connection-failover-enabled: true
       connection-properties:
         oracle.jdbc.defaultLobPrefetchSize: 4000
         oracle.net.keepAlive: true
         oracle.net.TCP_KEEPIDLE: 60
 
-# Actuator：关闭默认 db 健康检查，使用 §6.4 自定义 dynamicDbHealth（避免与热刷竞争借连接）
+# Actuator：关闭默认 db 健康检查，使用 §6.4 自定义 dynamicDbHealth（借连 isValid 探测 + UCP 池统计）
 management:
   endpoint:
     health:
@@ -338,7 +371,7 @@ package zxf.logging.springboot.cred;
 import java.util.Properties;
 
 /**
- * 不可变凭据载体，天然线程安全
+ * 不可变凭据载体，天然线程安全。
  */
 public record DbCredentials(String username, String password) {
 
@@ -375,6 +408,12 @@ import java.nio.file.Path;
 import java.nio.file.StandardWatchEventKinds;
 import java.nio.file.WatchService;
 
+/**
+ * K8s 挂载的 Vault Static Role 凭据文件源。
+ * 单一职责：定位文件、判断可用性、读取凭据、完成 WatchService 注册。
+ * 无 getter——外部不询问 dir，而是告知它完成注册（Tell, Don't Ask）。
+ * 既可作 Spring Bean 供运行期热刷注入，也可被 ContextInitializer 在上下文创建前直接 new。
+ */
 @Component
 @RequiredArgsConstructor
 public class CredentialFileSource {
@@ -390,6 +429,11 @@ public class CredentialFileSource {
         String username = Files.readString(usernameFile());
         String password = Files.readString(passwordFile());
         return new DbCredentials(username.trim(), password.trim());
+    }
+
+    /** 写回新密码（模拟 ESO/kubelet 更新挂载文件），触发 watcher 热刷管线 */
+    public void writePassword(String newPassword) throws IOException {
+        Files.writeString(passwordFile(), newPassword);
     }
 
     /** Tell 风格：由文件源自己完成 WatchService 注册，而非暴露 dir 供外部询问 */
@@ -433,6 +477,11 @@ import java.util.Map;
  * 在上下文 refresh 前（ApplicationContextInitializer）把 K8s 挂载的 Vault Static Role 凭据
  * 注入 Environment 最高优先级，覆盖 application.yml，确保 DataSource/Flyway/JPA 启动即用真实凭据。
  * dev（无挂载文件）时回退到 application.yml。
+ *
+ * <p>选型说明：Boot 4.x 中 EnvironmentPostProcessor 仍是有效扩展点（4.0 起接口迁至
+ * {@code org.springframework.boot} 包，spring.factories 注册 key 同步调整）。本方案选用 Spring Framework
+ * 核心的 ApplicationContextInitializer——时机同样早于 refresh（DataSource/Flyway/JPA 建连），API 面最小，
+ * 不受 Boot 扩展点演进影响。</p>
  */
 @Slf4j
 public class CredentialContextInitializer implements ApplicationContextInitializer<ConfigurableApplicationContext> {
@@ -488,9 +537,9 @@ org.springframework.context.ApplicationContextInitializer=zxf.logging.springboot
 | `SecretDirectoryWatcher` | 何时发现：WatchService 监听目录（独立 daemon 平台线程），过滤相关事件 | 3（含资源句柄） |
 | `CredentialChangeNotifier` | 何时通知：委派内嵌 `Debouncer` 去抖 → 发布 Spring 事件 | 2 |
 | `CredentialChangeNotifier.Debouncer` | 去抖机制：窗口内取消旧任务，仅执行最后一次（自带调度器） | 2 |
-| `UcpCredentialApplier` | 如何切换：旁路验证新凭据 → unwrap → reconfigureDataSource | 2 |
+| `UcpCredentialApplier` | 如何切换：旁路验证新凭据 → unwrap → reconfigureDataSource（池未启动时 UCP-76 兜底 setter）→ refreshConnectionPool | 2 |
 | `CredentialWatchBootstrap` | 启动接线：应用就绪后启动目录监听 | 2 |
-| `CredentialsChangedListener` | 事件 → 读取并应用；启动对齐一次 | 2 |
+| `CredentialsChangedListener` | 事件 → 读取并应用 | 2 |
 
 设计要点：
 
@@ -499,8 +548,9 @@ org.springframework.context.ApplicationContextInitializer=zxf.logging.springboot
 - **单一监听机制**：K8s Secret 更新通过 `..data` symlink 原子替换完成，监听目录的 WatchService 即可稳定捕获。
 - **注册前置**：目录注册在 `start()`（调用线程）完成；注册失败即终止应用启动——若降级运行（失去热刷能力），Vault 轮转后将演变为连接故障。
 - **先验证后切换**：用 DriverManager 旁路建连验证新凭据（池中旧连接在 reconfigure 后仍可借出，直接借连 `isValid` 无法区分新旧凭据）；验证失败不动池，等下一轮事件。
+- **先配置后回收**：`reconfigureDataSource` 仅影响新建连接，随后 `refreshConnectionPool` 回收空闲连接，使后续借连尽快使用新凭据；池未启动（`initialPoolSize=0` 懒建池）时 `reconfigureDataSource` 抛 UCP-76，兜底改用 `setUser/setPassword`，池首次启动即以新凭据建连。
 - **去抖合并**：K8s 原子替换短时触发多次事件，窗口内取消旧任务、仅执行最后一次。
-- unwrap 兼容 `connection-fetch=lazy` 包装，且为按次调用的纯函数（不持有派生状态）；异常脱敏（仅记 `toString`）；`@PreDestroy` 优雅关闭。
+- unwrap 兼容 `connection-fetch=lazy` 包装，且为按次调用的纯函数（不持有派生状态）；异常仅记消息与堆栈，不把含密码的 `Properties` 作为日志参数；`@PreDestroy` 优雅关闭。
 - **代码规范要点**：实例变量 ≤ 2（watcher 另持有一个由 `@PreDestroy` 管理的资源句柄字段）；无 getter/setter（文件源为 Tell 风格 `registerOn`）；无 `else`；标识符不缩写；原生类型以值对象封装（`Duration`）；每方法一层缩进（try 块不计）。applier 将验证逻辑保留为私有方法，避免因过度拆分再增字段与类。
 
 #### 6.3.1 变更事件（CredentialsChangedEvent）
@@ -514,6 +564,7 @@ import java.time.Instant;
 
 /**
  * 凭据变更事件：secret 卷中的凭据文件发生变化（去抖合并后发布）。
+ * Spring 支持任意对象作为事件载荷（无需继承 ApplicationEvent）。
  */
 public record CredentialsChangedEvent(Instant detectedAt) {
 }
@@ -687,6 +738,7 @@ package zxf.logging.springboot.cred;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import oracle.ucp.admin.UniversalConnectionPoolManagerImpl;
 import oracle.ucp.jdbc.PoolDataSource;
 import org.springframework.stereotype.Component;
 
@@ -704,15 +756,20 @@ import java.sql.SQLException;
 @RequiredArgsConstructor
 public class UcpCredentialApplier {
 
-    /** 借连验证的超时秒数 */
+    /**
+     * 借连验证的超时秒数
+     */
     private static final int VALIDATION_TIMEOUT_SECONDS = 3;
 
     private final DataSource dataSource;
-    /** 上次成功应用的凭据缓存；用于变更比较，避免调用已废弃的 PoolDataSource.getPassword() */
+    /**
+     * 上次成功应用的凭据缓存；用于变更比较，避免调用已废弃的 PoolDataSource.getPassword()
+     */
     private volatile DbCredentials lastApplied = DbCredentials.EMPTY;
 
     /**
      * 应用凭据：相同则跳过；不同则先旁路验证，再 reconfigure。
+     *
      * @return true=已切换或无变化；false=验证失败（池未被改动，旧凭据继续服务，等下轮事件）
      */
     public boolean apply(DbCredentials credentials) {
@@ -727,7 +784,9 @@ public class UcpCredentialApplier {
         return doApply(credentials);
     }
 
-    /** 验证 → 切换 → 记录；任何异常仅记消息（异常信息可能携带含密码的 Properties） */
+    /**
+     * 验证 → 切换 → 记录；任何异常仅记消息（异常信息可能携带含密码的 Properties）
+     */
     private boolean doApply(DbCredentials credentials) {
         try {
             // unwrap 是纯函数且代价可忽略，按次解出，不持有派生状态字段
@@ -738,14 +797,28 @@ public class UcpCredentialApplier {
                 return false;
             }
             log.info("Refreshing UCP credentials for user: {}", credentials.username());
-            pool.reconfigureDataSource(credentials.toProperties());
+
+
+            try {
+                pool.reconfigureDataSource(credentials.toProperties());
+            } catch (SQLException ex) {
+                if (ex.getErrorCode() != 76) {
+                    throw ex;
+                }
+                // 池未启动（initialPoolSize=0 时首次借连前 UCP 懒建池），reconfigureDataSource 会抛 UCP-76；
+                // 直接用 setter 改连接工厂配置，池首次启动时即以新凭据建连
+                pool.setUser(credentials.username());
+                pool.setPassword(credentials.password());
+                log.warn("UCP pool not started, reconfigureDataSource failed with UCP-76; using setters instead");
+            }
+
+            UniversalConnectionPoolManagerImpl.getUniversalConnectionPoolManager().refreshConnectionPool(pool.getConnectionPoolName());
+            log.info("UCP credentials refreshed. borrowed={}, available={}", pool.getBorrowedConnectionsCount(), pool.getAvailableConnectionsCount());
+
             lastApplied = credentials;
-            log.info("UCP credentials refreshed. borrowed={}, available={}",
-                    pool.getBorrowedConnectionsCount(),
-                    pool.getAvailableConnectionsCount());
             return true;
-        } catch (Exception exception) {
-            log.error("Failed to refresh UCP credentials: {}", exception.toString());
+        } catch (Exception ex) {
+            log.error("Failed to refresh UCP credentials: {}", ex, ex);
             return false;
         }
     }
@@ -764,7 +837,9 @@ public class UcpCredentialApplier {
         }
     }
 
-    /** DataSource 可能被 LazyConnectionDataSourceProxy 包装（connection-fetch=lazy），需 unwrap 到真实 PoolDataSource */
+    /**
+     * DataSource 可能被 LazyConnectionDataSourceProxy 包装（connection-fetch=lazy），需 unwrap 到真实 PoolDataSource
+     */
     private static PoolDataSource unwrap(DataSource dataSource) {
         try {
             return dataSource.isWrapperFor(PoolDataSource.class)
@@ -779,7 +854,7 @@ public class UcpCredentialApplier {
 
 #### 6.3.5 启动接线与变更监听（Bootstrap / Listener）
 
-启动接线与事件应用分属不同生命周期，拆为两个类。两者都监听 ApplicationReadyEvent；`CredentialWatchBootstrap` 以 `@Order(HIGHEST_PRECEDENCE)` 保证先完成 WatchService 注册，使随后的启动对齐重读能完全收口「ContextInitializer 注入 → 监听注册」间的变更窗口。
+启动接线与事件应用分属不同生命周期，拆为两个类：`CredentialWatchBootstrap` 监听 ApplicationReadyEvent 完成 WatchService 注册；`CredentialsChangedListener` 仅消费 CredentialsChangedEvent。当前实现不做启动对齐重读——「ContextInitializer 注入 → 监听注册」之间存在一个亚秒级窗口，落在窗口内的轮转要等下一次文件事件才会被应用。
 
 ```java
 package zxf.logging.springboot.cred;
@@ -788,8 +863,6 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
-import org.springframework.core.Ordered;
-import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
@@ -802,16 +875,9 @@ import java.io.IOException;
 @Component
 @RequiredArgsConstructor
 public class CredentialWatchBootstrap {
-
     private final CredentialFileSource fileSource;
     private final SecretDirectoryWatcher watcher;
 
-    /**
-     * @Order 保证先于其他 ApplicationReadyEvent 监听完成 WatchService 注册——
-     * 先注册、再由 CredentialsChangedListener#alignOnStartup 重读一次，
-     * 才能完全收口「ContextInitializer 注入 → 监听注册」间的凭据变更窗口。
-     */
-    @Order(Ordered.HIGHEST_PRECEDENCE)
     @EventListener(ApplicationReadyEvent.class)
     void start() {
         if (!fileSource.isAvailable()) {
@@ -834,7 +900,6 @@ package zxf.logging.springboot.cred;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 
@@ -850,28 +915,11 @@ public class CredentialsChangedListener {
     private final UcpCredentialApplier applier;
 
     /**
-     * 启动对齐：lastApplied 为空，会以相同凭据触发一次 reconfigure（幂等），
-     * 同时验证「读文件 → 应用」链路可用。
-     * 依赖 CredentialWatchBootstrap（@Order(HIGHEST_PRECEDENCE)）先完成 WatchService 注册，
-     * 本次重读才能完全收口「ContextInitializer 注入 → 监听注册」间的变更窗口。
+     * 凭据变更事件 → 读取并应用
      */
-    @EventListener(ApplicationReadyEvent.class)
-    void alignOnStartup() {
-        if (!fileSource.isAvailable()) {
-            log.warn("Credential file not available, skip align");
-            return;
-        }
-        refresh();
-    }
-
-    /** 凭据变更事件 → 读取并应用 */
     @EventListener
     void onCredentialsChanged(CredentialsChangedEvent event) {
         log.debug("Credential change detected at {}", event.detectedAt());
-        refresh();
-    }
-
-    private void refresh() {
         try {
             applier.apply(fileSource.read());
         } catch (Exception exception) {
@@ -898,6 +946,10 @@ import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.SQLException;
 
+/**
+ * 自定义 DB 健康检查，替代默认 db 指标（默认已用 management.health.db.enabled=false 关闭）。
+ * 借连做 isValid 探测，UP 时 unwrap 暴露 UCP 池统计（borrowed/available）便于排障。
+ */
 @Component("dynamicDbHealth")
 @RequiredArgsConstructor
 public class DatabaseHealthIndicator implements HealthIndicator {

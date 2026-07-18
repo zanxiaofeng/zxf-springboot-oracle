@@ -36,5 +36,5 @@ management:
       show-details: always
   health:
     db:
-      # 关闭默认 db 健康检查，改用自定义 dynamicDbHealth，避免与凭据热刷新竞争借连接
+      # 关闭默认 db 健康检查，改用自定义 dynamicDbHealth（借连 isValid 探测，并暴露 UCP 池统计便于排障）
       enabled: false

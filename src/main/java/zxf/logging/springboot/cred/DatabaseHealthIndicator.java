@@ -11,8 +11,8 @@ import java.sql.Connection;
 import java.sql.SQLException;
 
 /**
- * 自定义 DB 健康检查，替代默认 db 指标（默认已用 management.health.db.enabled=false 关闭，
- * 避免与凭据热刷新竞争借连接）。如需排障可 unwrap 暴露 UCP 池统计。
+ * 自定义 DB 健康检查，替代默认 db 指标（默认已用 management.health.db.enabled=false 关闭）。
+ * 借连做 isValid 探测，UP 时 unwrap 暴露 UCP 池统计（borrowed/available）便于排障。
  */
 @Component("dynamicDbHealth")
 @RequiredArgsConstructor

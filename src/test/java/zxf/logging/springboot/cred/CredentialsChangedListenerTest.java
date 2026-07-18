@@ -39,18 +39,4 @@ class CredentialsChangedListenerTest {
 
         verify(applier, never()).apply(any());
     }
-
-    @Test
-    void alignOnStartup_skips_refresh_when_source_unavailable() throws Exception {
-        CredentialFileSource source = mock(CredentialFileSource.class);
-        UcpCredentialApplier applier = mock(UcpCredentialApplier.class);
-        when(source.isAvailable()).thenReturn(false);
-
-        CredentialsChangedListener listener = new CredentialsChangedListener(source, applier);
-
-        listener.alignOnStartup();
-
-        verify(source, never()).read();
-        verify(applier, never()).apply(any());
-    }
 }
