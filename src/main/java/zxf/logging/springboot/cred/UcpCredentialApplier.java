@@ -62,11 +62,19 @@ public class UcpCredentialApplier {
             }
             log.info("Refreshing UCP credentials for user: {}", credentials.username());
 
-            // 池未启动（initialPoolSize=0 时首次借连前 UCP 懒建池），reconfigureDataSource 会抛 UCP-76；
-            // 直接用 setter 改连接工厂配置，池首次启动时即以新凭据建连
-            pool.setUser(credentials.username());
-            pool.setPassword(credentials.password());
-            pool.reconfigureDataSource(credentials.toProperties());
+
+            try {
+                pool.reconfigureDataSource(credentials.toProperties());
+            } catch (SQLException ex) {
+                if (ex.getErrorCode() != 76) {
+                    throw ex;
+                }
+                // 池未启动（initialPoolSize=0 时首次借连前 UCP 懒建池），reconfigureDataSource 会抛 UCP-76；
+                // 直接用 setter 改连接工厂配置，池首次启动时即以新凭据建连
+                pool.setUser(credentials.username());
+                pool.setPassword(credentials.password());
+            }
+
             UniversalConnectionPoolManagerImpl.getUniversalConnectionPoolManager().refreshConnectionPool(pool.getConnectionPoolName());
             log.info("UCP credentials refreshed. borrowed={}, available={}", pool.getBorrowedConnectionsCount(), pool.getAvailableConnectionsCount());
 

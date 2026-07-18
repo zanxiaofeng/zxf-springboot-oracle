@@ -4,8 +4,6 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
-import org.springframework.core.Ordered;
-import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
@@ -18,16 +16,9 @@ import java.io.IOException;
 @Component
 @RequiredArgsConstructor
 public class CredentialWatchBootstrap {
-
     private final CredentialFileSource fileSource;
     private final SecretDirectoryWatcher watcher;
 
-    /**
-     * @Order 保证先于其他 ApplicationReadyEvent 监听完成 WatchService 注册——
-     * 先注册、再由 CredentialsChangedListener#alignOnStartup 重读一次，
-     * 才能完全收口「ContextInitializer 注入 → 监听注册」间的凭据变更窗口。
-     */
-    @Order(Ordered.HIGHEST_PRECEDENCE)
     @EventListener(ApplicationReadyEvent.class)
     void start() {
         if (!fileSource.isAvailable()) {
